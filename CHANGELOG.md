@@ -4,4 +4,5 @@
 
 * 首批 layer：`AbsVal`、`Clip`、`ReLU`、`Sigmoid`、`Swish`。
 * 第二批 layer：`ELU`、`HardSigmoid`、`TanH`、`Mish`、`Softplus`。
+* 第三批 layer：`Flatten`、`BNLL`、`Exp`、`Log`、`HardSwish`、`SELU`。
 * ncnn 侧 base layer 切到 mlayer，arch 特化与注册不变；189/189 测试通过。

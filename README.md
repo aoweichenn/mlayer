@@ -18,6 +18,12 @@
 | `TanH` | `include/mlayer/tanh.hpp` | in-place tanh |
 | `Mish` | `include/mlayer/mish.hpp` | in-place mish |
 | `Softplus` | `include/mlayer/softplus.hpp` | in-place softplus |
+| `Flatten` | `include/mlayer/flatten.hpp` | flatten to 1D |
+| `BNLL` | `include/mlayer/bnll.hpp` | in-place bnll |
+| `Exp` | `include/mlayer/exp.hpp` | exp / pow with scale+shift |
+| `Log` | `include/mlayer/log.hpp` | log / log_base with scale+shift |
+| `HardSwish` | `include/mlayer/hardswish.hpp` | alpha/beta hard swish |
+| `SELU` | `include/mlayer/selu.hpp` | alpha/lambda SELU |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
