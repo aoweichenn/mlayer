@@ -10,9 +10,9 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace mlayer {
+#include <mlayer/border.hpp>
 
-constexpr std::int32_t kBorderConstant = 0;
+namespace mlayer {
 
 #define MLAYER_POOLING_TEMPLATE \
     template<typename LayerT, typename MatT, typename OptionT, typename ParamDictT, bool Validate, \

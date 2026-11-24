@@ -28,6 +28,8 @@
 | `InnerProduct` | `include/mlayer/innerproduct.hpp` | 全连接；activation/int8 quantize 由消费方注入 |
 | `BatchNorm` | `include/mlayer/batchnorm.hpp` | 推理态 batch norm（预计算 a/b） |
 | `Convolution` | `include/mlayer/convolution.hpp` | 2D 卷积；padding/activation/int8 量化由消费方注入 |
+| `ConvolutionDepthWise` | `include/mlayer/convolutiondepthwise.hpp` | depthwise/group 卷积；padding/flatten/activation/int8 由消费方注入 |
+| `Deconvolution` | `include/mlayer/deconvolution.hpp` | 转置卷积；输出裁剪/flatten/activation 由消费方注入 |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，

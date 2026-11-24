@@ -11,9 +11,10 @@
 #include <cstdint>
 #include <vector>
 
-namespace mlayer {
+#include <mlayer/border.hpp>
+#include <mlayer/quantize.hpp>
 
-constexpr std::int32_t kConvolutionBorderConstant = 0;
+namespace mlayer {
 
 template<typename LayerT, typename MatT, typename OptionT, typename ParamDictT, typename ModelBinT, bool Validate,
          bool Int8, float (*Activation)(float, std::int32_t, const MatT&),
@@ -406,7 +407,7 @@ void Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, A
     {
         OptionT opt_b = opt;
         opt_b.blob_allocator = opt.workspace_allocator;
-        CopyMakeBorder(bottom_blob, bottom_blob_bordered, pad_top, pad_bottom, pad_left, pad_right, kConvolutionBorderConstant, pad_value, opt_b);
+        CopyMakeBorder(bottom_blob, bottom_blob_bordered, pad_top, pad_bottom, pad_left, pad_right, kBorderConstant, pad_value, opt_b);
     }
     else if (pad_left == -233 && pad_right == -233 && pad_top == -233 && pad_bottom == -233)
     {
@@ -417,7 +418,7 @@ void Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, A
         {
             OptionT opt_b = opt;
             opt_b.blob_allocator = opt.workspace_allocator;
-            CopyMakeBorder(bottom_blob, bottom_blob_bordered, hpad / 2, hpad - hpad / 2, wpad / 2, wpad - wpad / 2, kConvolutionBorderConstant, pad_value, opt_b);
+            CopyMakeBorder(bottom_blob, bottom_blob_bordered, hpad / 2, hpad - hpad / 2, wpad / 2, wpad - wpad / 2, kBorderConstant, pad_value, opt_b);
         }
     }
     else if (pad_left == -234 && pad_right == -234 && pad_top == -234 && pad_bottom == -234)
@@ -429,17 +430,9 @@ void Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, A
         {
             OptionT opt_b = opt;
             opt_b.blob_allocator = opt.workspace_allocator;
-            CopyMakeBorder(bottom_blob, bottom_blob_bordered, hpad - hpad / 2, hpad / 2, wpad - wpad / 2, wpad / 2, kConvolutionBorderConstant, pad_value, opt_b);
+            CopyMakeBorder(bottom_blob, bottom_blob_bordered, hpad - hpad / 2, hpad / 2, wpad - wpad / 2, wpad / 2, kBorderConstant, pad_value, opt_b);
         }
     }
-}
-
-static inline std::int8_t float2int8(float v)
-{
-    std::int32_t int32 = static_cast<std::int32_t>(std::round(v));
-    if (int32 > 127) return 127;
-    if (int32 < -127) return -127;
-    return (std::int8_t)int32;
 }
 
 MLAYER_CONVOLUTION_TEMPLATE
@@ -552,7 +545,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                 {
                     // requantize
                     float scale_out = top_blob_int8_scales[0];
-                    std::int8_t sums8 = float2int8(sumfp32 * scale_out);
+                    std::int8_t sums8 = float_to_int8(sumfp32 * scale_out);
                     outptr[0] = sums8;
                     outptr += 1;
                 }
