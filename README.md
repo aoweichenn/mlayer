@@ -25,6 +25,7 @@
 | `HardSwish` | `include/mlayer/hardswish.hpp` | alpha/beta hard swish |
 | `SELU` | `include/mlayer/selu.hpp` | alpha/lambda SELU |
 | `Pooling` | `include/mlayer/pooling.hpp` | max/avg/global/adaptive pooling；padding 由消费方注入 |
+| `InnerProduct` | `include/mlayer/innerproduct.hpp` | 全连接；activation/int8 quantize 由消费方注入 |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
