@@ -34,6 +34,10 @@
 | `Convolution3D` | `include/mlayer/convolution3d.hpp` | 3D 卷积；3D padding/activation 由消费方注入 |
 | `PReLU` | `include/mlayer/prelu.hpp` | 1D/2D/3D/4D PReLU |
 | `Normalize` | `include/mlayer/normalize.hpp` | L2 normalize，支持 spatial/channel 组合与 eps mode |
+| `Threshold` | `include/mlayer/threshold.hpp` | 阈值二值化 |
+| `Power` | `include/mlayer/power.hpp` | pow(shift + x * scale, power) |
+| `Erf` | `include/mlayer/erf.hpp` | in-place erf |
+| `GELU` | `include/mlayer/gelu.hpp` | exact / fast GELU |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
