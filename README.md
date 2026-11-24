@@ -13,6 +13,11 @@
 | `ReLU` | `include/mlayer/relu.hpp` | slope ReLU，in-place |
 | `Sigmoid` | `include/mlayer/sigmoid.hpp` | in-place sigmoid |
 | `Swish` | `include/mlayer/swish.hpp` | in-place swish |
+| `ELU` | `include/mlayer/elu.hpp` | alpha ELU |
+| `HardSigmoid` | `include/mlayer/hardsigmoid.hpp` | alpha/beta hard sigmoid |
+| `TanH` | `include/mlayer/tanh.hpp` | in-place tanh |
+| `Mish` | `include/mlayer/mish.hpp` | in-place mish |
+| `Softplus` | `include/mlayer/softplus.hpp` | in-place softplus |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
