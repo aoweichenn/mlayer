@@ -30,6 +30,10 @@
 | `Convolution` | `include/mlayer/convolution.hpp` | 2D 卷积；padding/activation/int8 量化由消费方注入 |
 | `ConvolutionDepthWise` | `include/mlayer/convolutiondepthwise.hpp` | depthwise/group 卷积；padding/flatten/activation/int8 由消费方注入 |
 | `Deconvolution` | `include/mlayer/deconvolution.hpp` | 转置卷积；输出裁剪/flatten/activation 由消费方注入 |
+| `Convolution1D` | `include/mlayer/convolution1d.hpp` | 1D 卷积；padding/activation/flatten 由消费方注入 |
+| `Convolution3D` | `include/mlayer/convolution3d.hpp` | 3D 卷积；3D padding/activation 由消费方注入 |
+| `PReLU` | `include/mlayer/prelu.hpp` | 1D/2D/3D/4D PReLU |
+| `Normalize` | `include/mlayer/normalize.hpp` | L2 normalize，支持 spatial/channel 组合与 eps mode |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
