@@ -17,4 +17,6 @@
 * `Threshold` / `Power` / `Erf` / `GELU`：无权重 in-place 激活层。
 * `Bias` / `Scale` / `Dropout`：带权重或参数的逐元素层。
 * `ShuffleChannel` / `PixelShuffle` / `Reorg`：通道/空间重排层。
+* `LayerNorm` / `RMSNorm` / `GroupNorm` / `Softmax`：LLM 与视觉常用归一化/激活层。
+* `YoloV5Focus`：可选 examples 自定义层，供旧版 YOLOv5 param 使用。
 * ncnn 侧 base layer 切到 mlayer，arch 特化与注册不变；189/189 测试通过。

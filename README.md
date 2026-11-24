@@ -44,6 +44,11 @@
 | `ShuffleChannel` | `include/mlayer/shufflechannel.hpp` | channel shuffle / reverse |
 | `PixelShuffle` | `include/mlayer/pixelshuffle.hpp` | upscale pixel shuffle，两种 mode |
 | `Reorg` | `include/mlayer/reorg.hpp` | reorg，两种 mode |
+| `LayerNorm` | `include/mlayer/layernorm.hpp` | 1D–4D layer norm，affine 可选 |
+| `RMSNorm` | `include/mlayer/rmsnorm.hpp` | 1D–4D RMS norm，affine 可选 |
+| `GroupNorm` | `include/mlayer/groupnorm.hpp` | group norm，affine 可选 |
+| `Softmax` | `include/mlayer/softmax.hpp` | 1D–4D softmax，正/负 axis |
+| `YoloV5Focus` | `include/mlayer/yolov5focus.hpp` | 可选 examples 自定义层（非 ncnn core） |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
