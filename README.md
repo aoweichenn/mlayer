@@ -26,6 +26,8 @@
 | `SELU` | `include/mlayer/selu.hpp` | alpha/lambda SELU |
 | `Pooling` | `include/mlayer/pooling.hpp` | max/avg/global/adaptive pooling；padding 由消费方注入 |
 | `InnerProduct` | `include/mlayer/innerproduct.hpp` | 全连接；activation/int8 quantize 由消费方注入 |
+| `BatchNorm` | `include/mlayer/batchnorm.hpp` | 推理态 batch norm（预计算 a/b） |
+| `Convolution` | `include/mlayer/convolution.hpp` | 2D 卷积；padding/activation/int8 量化由消费方注入 |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
