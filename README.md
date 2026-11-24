@@ -38,6 +38,12 @@
 | `Power` | `include/mlayer/power.hpp` | pow(shift + x * scale, power) |
 | `Erf` | `include/mlayer/erf.hpp` | in-place erf |
 | `GELU` | `include/mlayer/gelu.hpp` | exact / fast GELU |
+| `Bias` | `include/mlayer/bias.hpp` | per-channel bias |
+| `Scale` | `include/mlayer/scale.hpp` | 静态/动态 scale + bias |
+| `Dropout` | `include/mlayer/dropout.hpp` | 推理态缩放 |
+| `ShuffleChannel` | `include/mlayer/shufflechannel.hpp` | channel shuffle / reverse |
+| `PixelShuffle` | `include/mlayer/pixelshuffle.hpp` | upscale pixel shuffle，两种 mode |
+| `Reorg` | `include/mlayer/reorg.hpp` | reorg，两种 mode |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
