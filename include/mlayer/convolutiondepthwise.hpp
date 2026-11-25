@@ -11,6 +11,9 @@
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 #include <cstddef>
 #include <cstdint>
@@ -339,6 +342,39 @@ std::int32_t ConvolutionDepthWise<LayerT, MatT, OptionT, ParamDictT, ModelBinT, 
                             acc = _mm256_fmadd_ps(_mm256_loadu_ps(sptr + j + space_ofs[k]), wv[k], acc);
                         }
                         _mm256_storeu_ps(optr + j, acc);
+                    }
+                    for (; j < outw; j++)
+                    {
+                        float sum = bias_term ? bias_data[g] : 0.f;
+                        for (std::int32_t k = 0; k < maxk; k++)
+                        {
+                            sum += sptr[j + space_ofs[k]] * kptr[k];
+                        }
+                        optr[j] = sum;
+                    }
+                }
+                continue;
+#elif defined(__ARM_NEON)
+                float32x4_t wv[9];
+                for (std::int32_t k = 0; k < maxk; k++)
+                {
+                    wv[k] = vdupq_n_f32(kptr[k]);
+                }
+                const float32x4_t bv = vdupq_n_f32(bias_term ? bias_data[g] : 0.f);
+
+                for (std::int32_t i = 0; i < outh; i++)
+                {
+                    const float* sptr = m.row(i * stride_h);
+                    float* optr = outptr + i * outw;
+                    std::int32_t j = 0;
+                    for (; j + 4 <= outw; j += 4)
+                    {
+                        float32x4_t acc = bv;
+                        for (std::int32_t k = 0; k < maxk; k++)
+                        {
+                            acc = vfmaq_f32(acc, vld1q_f32(sptr + j + space_ofs[k]), wv[k]);
+                        }
+                        vst1q_f32(optr + j, acc);
                     }
                     for (; j < outw; j++)
                     {

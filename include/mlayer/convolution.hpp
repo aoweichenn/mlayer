@@ -11,6 +11,9 @@
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -416,6 +419,32 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                     outptr[3][i] += v * wptr[3][q];
                 }
             }
+#elif defined(__ARM_NEON)
+            for (std::int32_t q = 0; q < inch; q++)
+            {
+                const float* sptr = bottom_blob.channel(q);
+                const float32x4_t wv0 = vdupq_n_f32(wptr[0][q]);
+                const float32x4_t wv1 = vdupq_n_f32(wptr[1][q]);
+                const float32x4_t wv2 = vdupq_n_f32(wptr[2][q]);
+                const float32x4_t wv3 = vdupq_n_f32(wptr[3][q]);
+                std::int32_t i = i_begin;
+                for (; i + 4 <= i_end; i += 4)
+                {
+                    const float32x4_t v = vld1q_f32(sptr + i);
+                    vst1q_f32(outptr[0] + i, vfmaq_f32(vld1q_f32(outptr[0] + i), v, wv0));
+                    vst1q_f32(outptr[1] + i, vfmaq_f32(vld1q_f32(outptr[1] + i), v, wv1));
+                    vst1q_f32(outptr[2] + i, vfmaq_f32(vld1q_f32(outptr[2] + i), v, wv2));
+                    vst1q_f32(outptr[3] + i, vfmaq_f32(vld1q_f32(outptr[3] + i), v, wv3));
+                }
+                for (; i < i_end; i++)
+                {
+                    const float v = sptr[i];
+                    outptr[0][i] += v * wptr[0][q];
+                    outptr[1][i] += v * wptr[1][q];
+                    outptr[2][i] += v * wptr[2][q];
+                    outptr[3][i] += v * wptr[3][q];
+                }
+            }
 #else
             for (std::int32_t q = 0; q < inch; q++)
             {
@@ -604,19 +633,40 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                 outptr[6][m] = fused_activation(sum6, activation_type, activation_params);
                 outptr[7][m] = fused_activation(sum7, activation_type, activation_params);
             }
-#else
+#elif defined(__ARM_NEON)
             for (std::int32_t m = 0; m < M; m++)
             {
                 const float* cp = col.row(m);
-                float sum0 = bias[0];
-                float sum1 = bias[1];
-                float sum2 = bias[2];
-                float sum3 = bias[3];
-                float sum4 = bias[4];
-                float sum5 = bias[5];
-                float sum6 = bias[6];
-                float sum7 = bias[7];
-                for (std::int32_t k = 0; k < K; k++)
+                float32x4_t a0 = vdupq_n_f32(0.0F);
+                float32x4_t a1 = vdupq_n_f32(0.0F);
+                float32x4_t a2 = vdupq_n_f32(0.0F);
+                float32x4_t a3 = vdupq_n_f32(0.0F);
+                float32x4_t a4 = vdupq_n_f32(0.0F);
+                float32x4_t a5 = vdupq_n_f32(0.0F);
+                float32x4_t a6 = vdupq_n_f32(0.0F);
+                float32x4_t a7 = vdupq_n_f32(0.0F);
+                std::int32_t k = 0;
+                for (; k + 4 <= K; k += 4)
+                {
+                    const float32x4_t c = vld1q_f32(cp + k);
+                    a0 = vfmaq_f32(a0, c, vld1q_f32(wptr[0] + k));
+                    a1 = vfmaq_f32(a1, c, vld1q_f32(wptr[1] + k));
+                    a2 = vfmaq_f32(a2, c, vld1q_f32(wptr[2] + k));
+                    a3 = vfmaq_f32(a3, c, vld1q_f32(wptr[3] + k));
+                    a4 = vfmaq_f32(a4, c, vld1q_f32(wptr[4] + k));
+                    a5 = vfmaq_f32(a5, c, vld1q_f32(wptr[5] + k));
+                    a6 = vfmaq_f32(a6, c, vld1q_f32(wptr[6] + k));
+                    a7 = vfmaq_f32(a7, c, vld1q_f32(wptr[7] + k));
+                }
+                float sum0 = bias[0] + vaddvq_f32(a0);
+                float sum1 = bias[1] + vaddvq_f32(a1);
+                float sum2 = bias[2] + vaddvq_f32(a2);
+                float sum3 = bias[3] + vaddvq_f32(a3);
+                float sum4 = bias[4] + vaddvq_f32(a4);
+                float sum5 = bias[5] + vaddvq_f32(a5);
+                float sum6 = bias[6] + vaddvq_f32(a6);
+                float sum7 = bias[7] + vaddvq_f32(a7);
+                for (; k < K; k++)
                 {
                     const float c = cp[k];
                     sum0 += c * wptr[0][k];
