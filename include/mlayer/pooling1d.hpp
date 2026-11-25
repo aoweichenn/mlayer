@@ -108,7 +108,9 @@ std::int32_t Pooling1D<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(con
         if (this->kernel_w <= 0) {
             return -1;
         }
-        outw = (w + this->pad_left + this->pad_right - this->kernel_w) / this->stride_w + 1;
+        const std::int32_t wtail = (w + this->pad_left + this->pad_right - this->kernel_w) % this->stride_w;
+        const std::int32_t padtail = wtail != 0 ? this->stride_w - wtail : 0;
+        outw = (w + this->pad_left + this->pad_right + padtail - this->kernel_w) / this->stride_w + 1;
     } else if (this->pad_mode == 1) {
         if (this->kernel_w <= 0) {
             return -1;
