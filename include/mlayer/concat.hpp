@@ -150,7 +150,7 @@ std::int32_t Concat<LayerT, MatT, OptionT, ParamDictT>::forward(const std::vecto
         // concat dim
         std::int32_t w = bottom_blobs[0].w;
         std::int32_t h = bottom_blobs[0].h;
-        std::int32_t d = bottom_blobs[0].d;
+        std::int32_t d = bottom_blobs[0].d > 0 ? bottom_blobs[0].d : 1;
 
         // total channels
         std::int32_t top_channels = 0;
@@ -194,7 +194,7 @@ std::int32_t Concat<LayerT, MatT, OptionT, ParamDictT>::forward(const std::vecto
     {
         // interleave dim height
         std::int32_t w = bottom_blobs[0].w;
-        std::int32_t d = bottom_blobs[0].d;
+        std::int32_t d = bottom_blobs[0].d > 0 ? bottom_blobs[0].d : 1;
         std::int32_t channels = bottom_blobs[0].c;
 
         // total height
@@ -241,7 +241,7 @@ std::int32_t Concat<LayerT, MatT, OptionT, ParamDictT>::forward(const std::vecto
     {
         // interleave dim width
         std::int32_t h = bottom_blobs[0].h;
-        std::int32_t d = bottom_blobs[0].d;
+        std::int32_t d = bottom_blobs[0].d > 0 ? bottom_blobs[0].d : 1;
         std::int32_t channels = bottom_blobs[0].c;
 
         // total width
@@ -253,7 +253,10 @@ std::int32_t Concat<LayerT, MatT, OptionT, ParamDictT>::forward(const std::vecto
         }
 
         MatT& top_blob = top_blobs[0];
-        top_blob.create(top_w, h, d, channels, elemsize, opt.blob_allocator);
+        if (dims == 3)
+            top_blob.create(top_w, h, channels, elemsize, opt.blob_allocator);
+        else
+            top_blob.create(top_w, h, d, channels, elemsize, opt.blob_allocator);
         if (top_blob.empty())
             return -100;
 
