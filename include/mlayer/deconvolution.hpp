@@ -33,8 +33,9 @@ protected:
     static std::int32_t deconvolution(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data,
                                       const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h,
                                       std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w,
-                                      std::int32_t dilation_h, std::int32_t activation_type,
-                                      const MatT& activation_params, const OptionT& opt);
+                                      std::int32_t dilation_h, std::int32_t group,
+                                      std::int32_t activation_type, const MatT& activation_params,
+                                      const OptionT& opt);
 
 public:
     std::int32_t num_output;
@@ -53,6 +54,7 @@ public:
     std::int32_t output_w;
     std::int32_t output_h;
     std::int32_t bias_term;
+    std::int32_t group;
 
     std::int32_t weight_data_size;
 
@@ -99,6 +101,7 @@ std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validat
     output_h = pd.get(21, output_w);
     bias_term = pd.get(5, 0);
     weight_data_size = pd.get(6, 0);
+    group = pd.get(7, 1);
     activation_type = pd.get(9, 0);
     activation_params = pd.get(10, MatT());
 
@@ -174,7 +177,7 @@ std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validat
 }
 
 MLAYER_DECONVOLUTION_TEMPLATE
-std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Activation, CopyCutBorder, Flatten>::deconvolution(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
+std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Activation, CopyCutBorder, Flatten>::deconvolution(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t group, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
 {
     const std::int32_t outw = top_blob.w;
     const std::int32_t outch = top_blob.c;
@@ -213,6 +216,8 @@ std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validat
         const std::int32_t w = bottom_blob.w;
         const std::int32_t h = bottom_blob.h;
         const std::int32_t inch = bottom_blob.c;
+        const std::int32_t inch_g = inch / group;
+        const std::int32_t g = p / (outch / group);
         const std::int32_t outw = top_blob.w;
         const std::int32_t outh = top_blob.h;
 
@@ -222,9 +227,9 @@ std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validat
             {
                 float* outptr = out.row(i * stride_h) + j * stride_w;
 
-                const float* kptr = (const float*)weight_data + maxk * inch * p;
+                const float* kptr = static_cast<const float*>(weight_data) + maxk * inch_g * p;
 
-                for (std::int32_t q = 0; q < inch; q++)
+                for (std::int32_t q = g * inch_g; q < (g + 1) * inch_g; q++)
                 {
                     const float val = bottom_blob.channel(q).row(i)[j];
 
@@ -256,6 +261,9 @@ std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validat
 MLAYER_DECONVOLUTION_TEMPLATE
 std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Activation, CopyCutBorder, Flatten>::forward(const MatT& bottom_blob, MatT& top_blob, const OptionT& opt) const
 {
+    if (group <= 0 || num_output % group != 0 || bottom_blob.c % group != 0) {
+        return -1;
+    }
     std::int32_t w = bottom_blob.w;
     std::int32_t h = bottom_blob.h;
     std::size_t elemsize = bottom_blob.elemsize;
@@ -279,7 +287,9 @@ std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validat
     if (top_blob_bordered.empty())
         return -100;
 
-    std::int32_t ret = deconvolution(bottom_blob, top_blob_bordered, weight_data, bias_data, kernel_w, kernel_h, stride_w, stride_h, dilation_w, dilation_h, activation_type, activation_params, opt);
+    std::int32_t ret = deconvolution(bottom_blob, top_blob_bordered, weight_data, bias_data, kernel_w, kernel_h,
+                                     stride_w, stride_h, dilation_w, dilation_h, group, activation_type,
+                                     activation_params, opt);
     if (ret != 0)
         return ret;
 
@@ -300,7 +310,7 @@ std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validat
     const std::int32_t _num_input = bottom_blob.c;
     const std::int32_t _kernel_w = _weight_data.w;
     const std::int32_t _kernel_h = _weight_data.h;
-    const std::int32_t _num_output = _weight_data.d * 1;
+    const std::int32_t _num_output = _weight_data.d * group;
 
     MatT weight_data_flattened;
     Flatten(_weight_data, weight_data_flattened, opt);
@@ -310,15 +320,15 @@ std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validat
     // transpose group-inch/group-outch/group-kh-kw to group-outch/group-inch/group-kh-kw
     MatT weight_data_transposed;
     {
-        weight_data_transposed.create(_kernel_w * _kernel_h * _num_output * _num_input / 1, 4u, opt.workspace_allocator);
+        weight_data_transposed.create(_kernel_w * _kernel_h * _num_output * _num_input / group, 4u, opt.workspace_allocator);
         if (weight_data_transposed.empty())
             return -100;
 
-        const std::int32_t outch_g = _num_output / 1;
-        const std::int32_t inch_g = _num_input / 1;
+        const std::int32_t outch_g = _num_output / group;
+        const std::int32_t inch_g = _num_input / group;
         const std::int32_t maxk = _kernel_h * _kernel_w;
 
-        for (std::int32_t g = 0; g < 1; g++)
+        for (std::int32_t g = 0; g < group; g++)
         {
             // reorder weight from inch-outch to outch-inch
             float* wg2 = (float*)weight_data_transposed + g * outch_g * inch_g * maxk;
@@ -367,7 +377,8 @@ std::int32_t Deconvolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validat
     if (top_blob_bordered.empty())
         return -100;
 
-    std::int32_t ret = deconvolution(bottom_blob, top_blob_bordered, weight_data_transposed, bias_data_flattened, _kernel_w, _kernel_h, stride_w, stride_h, dilation_w, dilation_h, activation_type, activation_params, opt);
+    std::int32_t ret = deconvolution(bottom_blob, top_blob_bordered, weight_data_transposed, bias_data_flattened, _kernel_w, _kernel_h, stride_w, stride_h,
+                                     dilation_w, dilation_h, group, activation_type, activation_params, opt);
     if (ret != 0)
         return ret;
 

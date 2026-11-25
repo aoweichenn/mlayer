@@ -519,8 +519,20 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
         }
     }
 
+    // ncnn compatibility: a 1D blob fed into a 1x1 convolution is treated as
+    // a 1x1xC feature map (the old InnerProduct path was equivalent).
+    MatT bottom_blob_reshaped;
+    const MatT* bottom_ptr = &bottom_blob;
+    if (bottom_blob.dims == 1 && kernel_w == 1 && kernel_h == 1)
+    {
+        bottom_blob_reshaped = bottom_blob.reshape(1, 1, bottom_blob.w, opt.workspace_allocator);
+        if (bottom_blob_reshaped.empty())
+            return -100;
+        bottom_ptr = &bottom_blob_reshaped;
+    }
+
     MatT bottom_blob_bordered;
-    make_padding(bottom_blob, bottom_blob_bordered, opt);
+    make_padding(*bottom_ptr, bottom_blob_bordered, opt);
     if (bottom_blob_bordered.empty())
         return -100;
 
