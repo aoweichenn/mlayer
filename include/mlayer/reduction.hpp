@@ -83,54 +83,67 @@ public:
         }
 
         const std::int32_t dims = bottom_blob.dims;
-        const std::int32_t in_size[4] = {
-            bottom_blob.w, dims >= 2 ? bottom_blob.h : 1, dims == 4 ? bottom_blob.d : 1,
-            dims >= 3 ? bottom_blob.c : 1};
+        // Compact axis list in fastest-first order. For 3D blobs the third
+        // axis is c (there is no d), matching ncnn's reduce flags.
+        const std::int32_t axis2_size = dims == 4 ? bottom_blob.d : (dims == 3 ? bottom_blob.c : 1);
+        const bool axis2_reduce = dims == 4 ? reduce[2] : (dims == 3 ? reduce[3] : false);
+        const std::int32_t sz[4] = {bottom_blob.w, dims >= 2 ? bottom_blob.h : 1, axis2_size,
+                                    dims == 4 ? bottom_blob.c : 1};
+        const bool red[4] = {reduce[0], reduce[1], axis2_reduce, dims == 4 ? reduce[3] : false};
 
-        // Output strides in fastest-first axis order.
         std::int32_t out_stride[4] = {0, 0, 0, 0};
-        const std::int32_t out_sizes[4] = {outw, outh, outd, outc};
         {
             std::int32_t stride = 1;
-            for (std::int32_t axis = 0; axis < dims; ++axis) {
+            for (std::int32_t axis = 0; axis < 4; ++axis) {
                 if (this->keepdims) {
                     out_stride[axis] = stride;
-                    stride *= out_sizes[axis];
-                } else if (!reduce[axis]) {
+                    stride *= red[axis] ? 1 : sz[axis];
+                } else if (!red[axis]) {
                     out_stride[axis] = stride;
-                    stride *= in_size[axis];
+                    stride *= sz[axis];
                 }
             }
         }
 
         std::int32_t reduce_count = 1;
-        for (std::int32_t axis = 0; axis < dims; ++axis) {
-            if (reduce[axis]) {
-                reduce_count *= in_size[axis];
+        for (std::int32_t axis = 0; axis < 4; ++axis) {
+            if (red[axis]) {
+                reduce_count *= sz[axis];
             }
         }
 
-        const std::int32_t in_w = in_size[0];
-        const std::int32_t in_h = in_size[1];
-        const std::int32_t in_d = in_size[2];
-        const std::int32_t in_c = in_size[3];
         const auto* in_ptr = static_cast<const float*>(bottom_blob);
         float* out_ptr = top_blob;
-
         const std::int32_t out_total = static_cast<std::int32_t>(top_blob.total());
+        const std::size_t cstep = bottom_blob.cstep;
+        const std::int32_t plane = bottom_blob.w * bottom_blob.h;
+
+        const std::int32_t n3 = dims == 4 ? bottom_blob.c : 1;
+        const std::int32_t n2 = axis2_size;
+        const std::int32_t n1 = sz[1];
+        const std::int32_t n0 = sz[0];
+
+        auto out_index = [&](std::int32_t a3, std::int32_t a2, std::int32_t a1, std::int32_t a0) {
+            return (red[3] ? 0 : a3) * out_stride[3] + (red[2] ? 0 : a2) * out_stride[2] +
+                   (red[1] ? 0 : a1) * out_stride[1] + (red[0] ? 0 : a0) * out_stride[0];
+        };
 
         if (this->operation == ReductionOp_LogSumExp) {
             std::vector<float> max_value(static_cast<std::size_t>(out_total), -FLT_MAX);
-            for (std::int32_t c = 0; c < in_c; ++c) {
-                for (std::int32_t d = 0; d < in_d; ++d) {
-                    for (std::int32_t y = 0; y < in_h; ++y) {
-                        for (std::int32_t x = 0; x < in_w; ++x) {
-                            const std::int32_t in_idx = ((c * in_d + d) * in_h + y) * in_w + x;
-                            const std::int32_t out_idx =
-                                (reduce[3] ? 0 : c) * out_stride[3] + (reduce[2] ? 0 : d) * out_stride[2] +
-                                (reduce[1] ? 0 : y) * out_stride[1] + (reduce[0] ? 0 : x) * out_stride[0];
-                            max_value[static_cast<std::size_t>(out_idx)] =
-                                std::max(max_value[static_cast<std::size_t>(out_idx)], in_ptr[in_idx]);
+            for (std::int32_t a3 = 0; a3 < n3; ++a3) {
+                for (std::int32_t a2 = 0; a2 < n2; ++a2) {
+                    for (std::int32_t a1 = 0; a1 < n1; ++a1) {
+                        for (std::int32_t a0 = 0; a0 < n0; ++a0) {
+                            const float* cbase = in_ptr;
+                            if (dims == 4) {
+                                cbase += static_cast<std::size_t>(a3) * cstep + static_cast<std::size_t>(a2) * plane;
+                            } else if (dims == 3) {
+                                cbase += static_cast<std::size_t>(a2) * cstep;
+                            }
+                            const float value = cbase[a1 * n0 + a0];
+                            const std::int32_t oi = out_index(a3, a2, a1, a0);
+                            max_value[static_cast<std::size_t>(oi)] =
+                                std::max(max_value[static_cast<std::size_t>(oi)], value);
                         }
                     }
                 }
@@ -138,16 +151,19 @@ public:
             for (std::int32_t i = 0; i < out_total; ++i) {
                 out_ptr[i] = 0.0F;
             }
-            for (std::int32_t c = 0; c < in_c; ++c) {
-                for (std::int32_t d = 0; d < in_d; ++d) {
-                    for (std::int32_t y = 0; y < in_h; ++y) {
-                        for (std::int32_t x = 0; x < in_w; ++x) {
-                            const std::int32_t in_idx = ((c * in_d + d) * in_h + y) * in_w + x;
-                            const std::int32_t out_idx =
-                                (reduce[3] ? 0 : c) * out_stride[3] + (reduce[2] ? 0 : d) * out_stride[2] +
-                                (reduce[1] ? 0 : y) * out_stride[1] + (reduce[0] ? 0 : x) * out_stride[0];
-                            out_ptr[out_idx] +=
-                                std::exp(in_ptr[in_idx] - max_value[static_cast<std::size_t>(out_idx)]);
+            for (std::int32_t a3 = 0; a3 < n3; ++a3) {
+                for (std::int32_t a2 = 0; a2 < n2; ++a2) {
+                    for (std::int32_t a1 = 0; a1 < n1; ++a1) {
+                        for (std::int32_t a0 = 0; a0 < n0; ++a0) {
+                            const float* cbase = in_ptr;
+                            if (dims == 4) {
+                                cbase += static_cast<std::size_t>(a3) * cstep + static_cast<std::size_t>(a2) * plane;
+                            } else if (dims == 3) {
+                                cbase += static_cast<std::size_t>(a2) * cstep;
+                            }
+                            const float value = cbase[a1 * n0 + a0];
+                            const std::int32_t oi = out_index(a3, a2, a1, a0);
+                            out_ptr[oi] += std::exp(value - max_value[static_cast<std::size_t>(oi)]);
                         }
                     }
                 }
@@ -173,16 +189,19 @@ public:
                     out_ptr[i] = 0.0F;
                 }
             }
-            for (std::int32_t c = 0; c < in_c; ++c) {
-                for (std::int32_t d = 0; d < in_d; ++d) {
-                    for (std::int32_t y = 0; y < in_h; ++y) {
-                        for (std::int32_t x = 0; x < in_w; ++x) {
-                            const std::int32_t in_idx = ((c * in_d + d) * in_h + y) * in_w + x;
-                            const std::int32_t out_idx =
-                                (reduce[3] ? 0 : c) * out_stride[3] + (reduce[2] ? 0 : d) * out_stride[2] +
-                                (reduce[1] ? 0 : y) * out_stride[1] + (reduce[0] ? 0 : x) * out_stride[0];
-                            const float v = in_ptr[in_idx];
-                            float& acc = out_ptr[out_idx];
+            for (std::int32_t a3 = 0; a3 < n3; ++a3) {
+                for (std::int32_t a2 = 0; a2 < n2; ++a2) {
+                    for (std::int32_t a1 = 0; a1 < n1; ++a1) {
+                        for (std::int32_t a0 = 0; a0 < n0; ++a0) {
+                            const float* cbase = in_ptr;
+                            if (dims == 4) {
+                                cbase += static_cast<std::size_t>(a3) * cstep + static_cast<std::size_t>(a2) * plane;
+                            } else if (dims == 3) {
+                                cbase += static_cast<std::size_t>(a2) * cstep;
+                            }
+                            const std::int32_t oi = out_index(a3, a2, a1, a0);
+                            const float v = cbase[a1 * n0 + a0];
+                            float& acc = out_ptr[oi];
                             switch (this->operation) {
                                 case ReductionOp_SUM:
                                 case ReductionOp_MEAN:
