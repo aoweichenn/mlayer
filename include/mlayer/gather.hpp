@@ -42,6 +42,25 @@ public:
         const std::int32_t count = indices.w * indices.h;
 
         MatT& top_blob = top_blobs[0];
+
+        // Axes beyond the effective rank are implicit singletons: the emitter
+        // maps ONNX [N,C,L] to (w,h,c) and frequently squeezes the leading
+        // dims away, so `Gather(axis=1, index=0)` on a 1-D blob must behave
+        // as the identity rather than fail.
+        std::int32_t effective_rank = data.dims;
+        if (data.dims == 3) {
+            effective_rank = (data.h == 1 && data.c == 1) ? 1 : (data.c == 1 ? 2 : 3);
+        }
+        if (this->axis >= effective_rank) {
+            for (std::int32_t i = 0; i < count; ++i) {
+                if (std::lround(indices[i]) != 0) {
+                    return -100;
+                }
+            }
+            top_blob = data;
+            return 0;
+        }
+
         const bool one_d = data.dims == 1 || (data.dims == 3 && data.h == 1 && data.c == 1);
         const bool two_d = data.dims == 2 || (data.dims == 3 && data.c == 1);
         if (this->axis == 0) {
@@ -76,6 +95,21 @@ public:
             return -100;
         }
 
+        if (this->axis == 2 && data.dims == 3) {
+            top_blob.create(data.w, data.h, count, 4u, opt.blob_allocator);
+            if (top_blob.empty()) {
+                return -100;
+            }
+            const std::size_t plane = static_cast<std::size_t>(data.w) * static_cast<std::size_t>(data.h);
+            for (std::int32_t i = 0; i < count; ++i) {
+                const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
+                if (index < 0 || index >= data.c) {
+                    return -100;
+                }
+                std::memcpy(top_blob.channel(i), data.channel(index), plane * sizeof(float));
+            }
+            return 0;
+        }
         if (this->axis == 1 && two_d) {
             top_blob.create(count, data.h, 4u, opt.blob_allocator);
             if (top_blob.empty()) {
