@@ -16,6 +16,10 @@
 
 #include <omp.h>
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 #include <mlayer/int8_quantize.hpp>
 
 namespace mlayer {
@@ -170,9 +174,26 @@ public:
                 for (std::int32_t j = 0; j < dst_seqlen; ++j) {
                     const float* kptr = key_head.row(j);
                     float sum = 0.0F;
+#if defined(__AVX2__)
+                    __m256 acc = _mm256_setzero_ps();
+                    std::int32_t k = 0;
+                    for (; k + 8 <= embed_dim; k += 8) {
+                        acc = _mm256_fmadd_ps(_mm256_loadu_ps(qptr + k), _mm256_loadu_ps(kptr + k), acc);
+                    }
+                    __m128 lo = _mm256_castps256_ps128(acc);
+                    __m128 hi = _mm256_extractf128_ps(acc, 1);
+                    __m128 s4 = _mm_add_ps(lo, hi);
+                    s4 = _mm_add_ps(s4, _mm_movehl_ps(s4, s4));
+                    s4 = _mm_add_ss(s4, _mm_shuffle_ps(s4, s4, 1));
+                    sum = _mm_cvtss_f32(s4);
+                    for (; k < embed_dim; ++k) {
+                        sum += qptr[k] * kptr[k];
+                    }
+#else
                     for (std::int32_t k = 0; k < embed_dim; ++k) {
                         sum += qptr[k] * kptr[k];
                     }
+#endif
                     outptr[j] = sum * scale_value;
                 }
             }
@@ -204,10 +225,24 @@ public:
                 }
             }
 
+            const float* value_base = value_head.row(0);
+            const std::size_t value_row_stride = static_cast<std::size_t>(value_head.w);
             for (std::int32_t i = 0; i < src_seqlen; ++i) {
                 const float* qkptr = qk_cross_head.row(i);
                 float* outptr = top_blob_head.row(i);
-                for (std::int32_t j = 0; j < out_embed_dim; ++j) {
+                std::int32_t j = 0;
+#if defined(__AVX2__)
+                for (; j + 8 <= out_embed_dim; j += 8) {
+                    __m256 acc = _mm256_setzero_ps();
+                    const float* vptr = value_base + j;
+                    for (std::int32_t k = 0; k < dst_seqlen; ++k) {
+                        acc = _mm256_fmadd_ps(_mm256_set1_ps(qkptr[k]), _mm256_loadu_ps(vptr), acc);
+                        vptr += value_row_stride;
+                    }
+                    _mm256_storeu_ps(outptr + j, acc);
+                }
+#endif
+                for (; j < out_embed_dim; ++j) {
                     float sum = 0.0F;
                     for (std::int32_t k = 0; k < dst_seqlen; ++k) {
                         sum += qkptr[k] * value_head.row(k)[j];

@@ -372,55 +372,81 @@ private:
         std::int32_t block_size, std::int32_t bits, float alpha, float beta,
         std::int32_t broadcast_type_C, std::int32_t output_transpose, const OptionT& opt) {
         const std::int32_t block_count = (K + block_size - 1) / block_size;
+        // Process kMTile activation rows per weight row read. Prefill passes
+        // M=seqlen and previously re-read every weight row M times; tiling
+        // reduces weight traffic by up to kMTile with identical arithmetic
+        // (per output element the block/k accumulation order is unchanged).
+        constexpr std::int32_t kMTile = 8;
+
+        const float* ptrC = C.empty() ? nullptr : static_cast<const float*>(C);
+        const std::size_t out_hstep =
+            top_blob.dims == 3 ? top_blob.cstep : static_cast<std::size_t>(top_blob.w);
+        const std::size_t a_hstep = A.dims == 3 ? A.cstep : static_cast<std::size_t>(A.w);
+        const float* input_scale_ptr =
+            input_scales.empty() ? nullptr : static_cast<const float*>(input_scales);
+        const std::int32_t mt_count = (M + kMTile - 1) / kMTile;
+
+        const auto init_sum = [&](std::int32_t i, std::int32_t j) -> float {
+            if (ptrC == nullptr) {
+                return 0.0F;
+            }
+            float sum = 0.0F;
+            if (broadcast_type_C == 0) {
+                sum = ptrC[0];
+            } else if (broadcast_type_C == 1 || broadcast_type_C == 2) {
+                sum = ptrC[static_cast<std::size_t>(i)];
+            } else if (broadcast_type_C == 3) {
+                sum = ptrC[static_cast<std::size_t>(i) * static_cast<std::size_t>(N) +
+                           static_cast<std::size_t>(j)];
+            } else {
+                sum = ptrC[static_cast<std::size_t>(j)];
+            }
+            return sum * beta;
+        };
+        const auto store_value = [&](std::int32_t i, std::int32_t j, float v) {
+            if (output_transpose != 0) {
+                top_blob[static_cast<std::size_t>(j) * out_hstep + static_cast<std::size_t>(i)] = v;
+            } else {
+                top_blob[static_cast<std::size_t>(i) * out_hstep + static_cast<std::size_t>(j)] = v;
+            }
+        };
 
         if (bits != 8) {
             // ncnn dequantizes 4/6-bit weights to fp32 and multiplies them with
             // the fp32 activation (no activation quantization on this path).
-            const float* ptrC = C.empty() ? nullptr : static_cast<const float*>(C);
-            const std::size_t out_hstep =
-                top_blob.dims == 3 ? top_blob.cstep : static_cast<std::size_t>(top_blob.w);
-            const std::size_t a_hstep = A.dims == 3 ? A.cstep : static_cast<std::size_t>(A.w);
-            const float* input_scale_ptr =
-                input_scales.empty() ? nullptr : static_cast<const float*>(input_scales);
 #pragma omp parallel for num_threads(opt.num_threads)
-            for (std::int32_t mn = 0; mn < M * N; ++mn) {
-                const std::int32_t i = mn / N;
-                const std::int32_t j = mn % N;
-                float sum = 0.0F;
-                if (ptrC != nullptr) {
-                    if (broadcast_type_C == 0) {
-                        sum = ptrC[0];
-                    } else if (broadcast_type_C == 1 || broadcast_type_C == 2) {
-                        sum = ptrC[static_cast<std::size_t>(i)];
-                    } else if (broadcast_type_C == 3) {
-                        sum = ptrC[static_cast<std::size_t>(i) * static_cast<std::size_t>(N) +
-                                   static_cast<std::size_t>(j)];
-                    } else if (broadcast_type_C == 4) {
-                        sum = ptrC[static_cast<std::size_t>(j)];
-                    }
-                    sum *= beta;
+            for (std::int32_t work = 0; work < mt_count * N; ++work) {
+                const std::int32_t t = work / N;
+                const std::int32_t j = work % N;
+                const std::int32_t i0 = t * kMTile;
+                const std::int32_t mi = std::min(kMTile, M - i0);
+
+                float sums[kMTile];
+                const float* arows[kMTile];
+                for (std::int32_t ii = 0; ii < mi; ++ii) {
+                    sums[ii] = init_sum(i0 + ii, j);
+                    arows[ii] = static_cast<const float*>(A) +
+                                static_cast<std::size_t>(i0 + ii) * a_hstep;
                 }
-                const float* ptrA = static_cast<const float*>(A) + static_cast<std::size_t>(i) * a_hstep;
+
                 const auto* ptrB = BT.template row<const unsigned char>(j);
                 const float* scale_ptr = BT_scales.row(j);
+
                 for (std::int32_t k0 = 0; k0 < K; k0 += block_size) {
                     const std::int32_t max_kk = block_size < K - k0 ? block_size : K - k0;
                     const float descale = 1.0F / scale_ptr[k0 / block_size];
                     for (std::int32_t kk = 0; kk < max_kk; ++kk) {
                         const std::int32_t k = k0 + kk;
                         const auto q = detail::unpack_weight_block(ptrB, k, bits);
-                        float v = ptrA[k];
-                        if (input_scale_ptr != nullptr) {
-                            v *= input_scale_ptr[k];
+                        const float w = static_cast<float>(q) * descale;
+                        const float in_scale = input_scale_ptr != nullptr ? input_scale_ptr[k] : 1.0F;
+                        for (std::int32_t ii = 0; ii < mi; ++ii) {
+                            sums[ii] += arows[ii][k] * in_scale * w;
                         }
-                        sum += v * (static_cast<float>(q) * descale);
                     }
                 }
-                sum *= alpha;
-                if (output_transpose != 0) {
-                    top_blob[static_cast<std::size_t>(j) * out_hstep + static_cast<std::size_t>(i)] = sum;
-                } else {
-                    top_blob[static_cast<std::size_t>(i) * out_hstep + static_cast<std::size_t>(j)] = sum;
+                for (std::int32_t ii = 0; ii < mi; ++ii) {
+                    store_value(i0 + ii, j, sums[ii] * alpha);
                 }
             }
             return 0;
@@ -437,9 +463,7 @@ private:
             return -100;
         }
 
-        const std::size_t A_hstep = A.dims == 3 ? A.cstep : static_cast<std::size_t>(A.w);
         const bool has_input_scale = !input_scales.empty();
-        const float* input_scale_ptr = has_input_scale ? static_cast<const float*>(input_scales) : nullptr;
 
 #pragma omp parallel for num_threads(opt.num_threads)
         for (std::int32_t i = 0; i < M; ++i) {
@@ -452,9 +476,9 @@ private:
                 for (std::int32_t kk = 0; kk < max_kk; ++kk) {
                     const std::int32_t k = k0 + kk;
                     float v = transA != 0
-                                  ? static_cast<const float*>(A)[static_cast<std::size_t>(k) * A_hstep +
+                                  ? static_cast<const float*>(A)[static_cast<std::size_t>(k) * a_hstep +
                                                                  static_cast<std::size_t>(i)]
-                                  : static_cast<const float*>(A)[static_cast<std::size_t>(i) * A_hstep +
+                                  : static_cast<const float*>(A)[static_cast<std::size_t>(i) * a_hstep +
                                                                  static_cast<std::size_t>(k)];
                     if (has_input_scale) {
                         v *= input_scale_ptr[k];
@@ -473,9 +497,9 @@ private:
                 for (std::int32_t kk = 0; kk < max_kk; ++kk) {
                     const std::int32_t k = k0 + kk;
                     float v = transA != 0
-                                  ? static_cast<const float*>(A)[static_cast<std::size_t>(k) * A_hstep +
+                                  ? static_cast<const float*>(A)[static_cast<std::size_t>(k) * a_hstep +
                                                                  static_cast<std::size_t>(i)]
-                                  : static_cast<const float*>(A)[static_cast<std::size_t>(i) * A_hstep +
+                                  : static_cast<const float*>(A)[static_cast<std::size_t>(i) * a_hstep +
                                                                  static_cast<std::size_t>(k)];
                     if (has_input_scale) {
                         v *= input_scale_ptr[k];
@@ -486,88 +510,75 @@ private:
             }
         }
 
-        const float* ptrC = C.empty() ? nullptr : static_cast<const float*>(C);
-        const std::size_t out_hstep = top_blob.dims == 3 ? top_blob.cstep : static_cast<std::size_t>(top_blob.w);
-
 #pragma omp parallel for num_threads(opt.num_threads)
-        for (std::int32_t mn = 0; mn < M * N; ++mn) {
-            const std::int32_t i = mn / N;
-            const std::int32_t j = mn % N;
-            float sum = 0.0F;
-            if (ptrC != nullptr) {
-                if (broadcast_type_C == 0) {
-                    sum = ptrC[0];
-                } else if (broadcast_type_C == 1 || broadcast_type_C == 2) {
-                    sum = ptrC[static_cast<std::size_t>(i)];
-                } else if (broadcast_type_C == 3) {
-                    sum = ptrC[static_cast<std::size_t>(i) * static_cast<std::size_t>(N) +
-                               static_cast<std::size_t>(j)];
-                } else if (broadcast_type_C == 4) {
-                    sum = ptrC[static_cast<std::size_t>(j)];
-                }
-                sum *= beta;
+        for (std::int32_t work = 0; work < mt_count * N; ++work) {
+            const std::int32_t t = work / N;
+            const std::int32_t j = work % N;
+            const std::int32_t i0 = t * kMTile;
+            const std::int32_t mi = std::min(kMTile, M - i0);
+
+            float sums[kMTile];
+            const std::int8_t* arows[kMTile];
+            const float* adescs[kMTile];
+            for (std::int32_t ii = 0; ii < mi; ++ii) {
+                sums[ii] = init_sum(i0 + ii, j);
+                arows[ii] = A_int8.template row<const std::int8_t>(i0 + ii);
+                adescs[ii] = A_descales.row(i0 + ii);
             }
 
-            const auto* ptrA = A_int8.template row<const std::int8_t>(i);
             const auto* ptrB = BT.template row<const std::int8_t>(j);
-            const float* A_descale_ptr = A_descales.row(i);
-            const float* B_scale_ptr = BT_scales.row(j);
+            const float* b_scale_ptr = BT_scales.row(j);
 
             for (std::int32_t g = 0; g < block_count; ++g) {
                 const std::int32_t k0 = g * block_size;
                 const std::int32_t max_kk = block_size < K - k0 ? block_size : K - k0;
-                std::int32_t sum_int32 = 0;
+                std::int32_t sums_int32[kMTile] = {0};
                 std::int32_t kk = 0;
-                if (bits == 8) {
 #if defined(__AVX2__)
-                    // Integer dot product, 32 lanes at a time via u8*s8
-                    // (abs/sign trick). Integer addition is associative, so the
-                    // result is bit-identical to scalar accumulation.
-                    const __m256i ones = _mm256_set1_epi16(1);
-                    __m256i acc = _mm256_setzero_si256();
-                    for (; kk + 32 <= max_kk; kk += 32) {
-                        _mm_prefetch(reinterpret_cast<const char*>(ptrB + k0 + kk + 256), _MM_HINT_T0);
+                const __m256i ones = _mm256_set1_epi16(1);
+                __m256i accv[kMTile];
+                for (std::int32_t ii = 0; ii < mi; ++ii) {
+                    accv[ii] = _mm256_setzero_si256();
+                }
+                for (; kk + 32 <= max_kk; kk += 32) {
+                    _mm_prefetch(reinterpret_cast<const char*>(ptrB + k0 + kk + 256), _MM_HINT_T0);
+                    const __m256i b8 =
+                        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptrB + k0 + kk));
+                    for (std::int32_t ii = 0; ii < mi; ++ii) {
                         const __m256i a8 =
-                            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptrA + k0 + kk));
-                        const __m256i b8 =
-                            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptrB + k0 + kk));
+                            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(arows[ii] + k0 + kk));
                         const __m256i a_abs = _mm256_abs_epi8(a8);
                         const __m256i b_signed = _mm256_sign_epi8(b8, a8);
                         const __m256i pairs = _mm256_maddubs_epi16(a_abs, b_signed);
-                        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(pairs, ones));
-                    }
-                    __m128i sum128 =
-                        _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
-                    sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
-                    sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 4));
-                    sum_int32 = _mm_cvtsi128_si32(sum128);
-#endif
-                    for (; kk < max_kk; ++kk) {
-                        const std::int32_t k = k0 + kk;
-                        sum_int32 += static_cast<std::int32_t>(ptrA[k]) * static_cast<std::int32_t>(ptrB[k]);
-                    }
-                } else {
-                    const auto* packed_b = reinterpret_cast<const unsigned char*>(ptrB);
-                    for (; kk < max_kk; ++kk) {
-                        const std::int32_t k = k0 + kk;
-                        sum_int32 += static_cast<std::int32_t>(ptrA[k]) *
-                                     detail::unpack_weight_block(packed_b, k, bits);
+                        accv[ii] = _mm256_add_epi32(accv[ii], _mm256_madd_epi16(pairs, ones));
                     }
                 }
-                sum += static_cast<float>(sum_int32) * A_descale_ptr[g] / B_scale_ptr[g];
+                for (std::int32_t ii = 0; ii < mi; ++ii) {
+                    __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(accv[ii]),
+                                                   _mm256_extracti128_si256(accv[ii], 1));
+                    sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
+                    sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 4));
+                    sums_int32[ii] = _mm_cvtsi128_si32(sum128);
+                }
+#endif
+                for (; kk < max_kk; ++kk) {
+                    const std::int32_t k = k0 + kk;
+                    const std::int32_t bv = static_cast<std::int32_t>(ptrB[k]);
+                    for (std::int32_t ii = 0; ii < mi; ++ii) {
+                        sums_int32[ii] += static_cast<std::int32_t>(arows[ii][k]) * bv;
+                    }
+                }
+                for (std::int32_t ii = 0; ii < mi; ++ii) {
+                    sums[ii] += static_cast<float>(sums_int32[ii]) * adescs[ii][g] / b_scale_ptr[g];
+                }
             }
-            sum *= alpha;
-
-            if (output_transpose != 0) {
-                top_blob[static_cast<std::size_t>(j) * out_hstep + static_cast<std::size_t>(i)] = sum;
-            } else {
-                top_blob[static_cast<std::size_t>(i) * out_hstep + static_cast<std::size_t>(j)] = sum;
+            for (std::int32_t ii = 0; ii < mi; ++ii) {
+                store_value(i0 + ii, j, sums[ii] * alpha);
             }
         }
 
         return 0;
     }
-
 public:
     float alpha;
     float beta;
