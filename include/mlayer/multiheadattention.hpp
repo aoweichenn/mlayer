@@ -13,6 +13,8 @@
 #include <cstring>
 #include <vector>
 
+#include <mlayer/int8_quantize.hpp>
+
 namespace mlayer {
 
 // Full multi-head attention with optional attention mask and KV cache.
@@ -25,15 +27,7 @@ namespace detail {
 // Bit-packed weight-block-quant format (ncnn quantize_term >= 400): each
 // output row is packed little-endian in `bits` per reduction index.
 inline std::int32_t mha_unpack_weight(const unsigned char* ptr, std::int32_t k, std::int32_t bits) {
-    const std::int32_t bit_offset = k * bits;
-    const std::int32_t byte_offset = bit_offset / 8;
-    const std::int32_t bit_shift = bit_offset % 8;
-    const unsigned int v = static_cast<unsigned int>(ptr[byte_offset]) |
-                           (static_cast<unsigned int>(ptr[byte_offset + 1]) << 8);
-    const std::int32_t mask = (1 << bits) - 1;
-    const std::int32_t raw = static_cast<std::int32_t>((v >> bit_shift) & static_cast<unsigned int>(mask));
-    const std::int32_t sign_bit = 1 << (bits - 1);
-    return (raw ^ sign_bit) - sign_bit;
+    return unpack_weight_block(ptr, k, bits);
 }
 
 inline signed char mha_float2int8(float v) {

@@ -15,10 +15,13 @@
 #include <cstdint>
 #include <vector>
 
+#include <mlayer/int8_quantize.hpp>
+
 namespace mlayer {
 
-// Standard fp32/fp16 Gemm path. Weight-block int8 and classic int8 paths are
-// intentionally rejected until the quantized kernels are ported.
+// Standard fp32/fp16/weight-block-quantized Gemm. Weight-block int4/int6/int8
+// weights are unpacked from ncnn's little-endian format; the classic int8
+// (quantize_term 1..3) path is still not ported.
 template<typename LayerT, typename MatT, typename OptionT, typename ParamDictT, typename ModelBinT>
 class Gemm : public LayerT {
 public:
@@ -357,18 +360,71 @@ private:
             return -100;
         }
 
-        return this->weight_block_quantize_gemm(A, this->transA, this->B_data, this->B_data_quantize_scales,
-                                                this->B_data_input_scales, C, top, M, N, K, block_size,
-                                                this->alpha, this->beta, broadcast_type_C,
-                                                this->output_transpose, opt);
+        return this->weight_block_quantize_gemm(
+            A, this->transA, this->B_data, this->B_data_quantize_scales, this->B_data_input_scales, C, top, M,
+            N, K, block_size, this->weight_block_quantize_bits, this->alpha, this->beta, broadcast_type_C,
+            this->output_transpose, opt);
     }
 
     static std::int32_t weight_block_quantize_gemm(
         const MatT& A, std::int32_t transA, const MatT& BT, const MatT& BT_scales, const MatT& input_scales,
         const MatT& C, MatT& top_blob, std::int32_t M, std::int32_t N, std::int32_t K,
-        std::int32_t block_size, float alpha, float beta, std::int32_t broadcast_type_C,
-        std::int32_t output_transpose, const OptionT& opt) {
+        std::int32_t block_size, std::int32_t bits, float alpha, float beta,
+        std::int32_t broadcast_type_C, std::int32_t output_transpose, const OptionT& opt) {
         const std::int32_t block_count = (K + block_size - 1) / block_size;
+
+        if (bits != 8) {
+            // ncnn dequantizes 4/6-bit weights to fp32 and multiplies them with
+            // the fp32 activation (no activation quantization on this path).
+            const float* ptrC = C.empty() ? nullptr : static_cast<const float*>(C);
+            const std::size_t out_hstep =
+                top_blob.dims == 3 ? top_blob.cstep : static_cast<std::size_t>(top_blob.w);
+            const std::size_t a_hstep = A.dims == 3 ? A.cstep : static_cast<std::size_t>(A.w);
+            const float* input_scale_ptr =
+                input_scales.empty() ? nullptr : static_cast<const float*>(input_scales);
+#pragma omp parallel for num_threads(opt.num_threads)
+            for (std::int32_t mn = 0; mn < M * N; ++mn) {
+                const std::int32_t i = mn / N;
+                const std::int32_t j = mn % N;
+                float sum = 0.0F;
+                if (ptrC != nullptr) {
+                    if (broadcast_type_C == 0) {
+                        sum = ptrC[0];
+                    } else if (broadcast_type_C == 1 || broadcast_type_C == 2) {
+                        sum = ptrC[static_cast<std::size_t>(i)];
+                    } else if (broadcast_type_C == 3) {
+                        sum = ptrC[static_cast<std::size_t>(i) * static_cast<std::size_t>(N) +
+                                   static_cast<std::size_t>(j)];
+                    } else if (broadcast_type_C == 4) {
+                        sum = ptrC[static_cast<std::size_t>(j)];
+                    }
+                    sum *= beta;
+                }
+                const float* ptrA = static_cast<const float*>(A) + static_cast<std::size_t>(i) * a_hstep;
+                const auto* ptrB = BT.template row<const unsigned char>(j);
+                const float* scale_ptr = BT_scales.row(j);
+                for (std::int32_t k0 = 0; k0 < K; k0 += block_size) {
+                    const std::int32_t max_kk = block_size < K - k0 ? block_size : K - k0;
+                    const float descale = 1.0F / scale_ptr[k0 / block_size];
+                    for (std::int32_t kk = 0; kk < max_kk; ++kk) {
+                        const std::int32_t k = k0 + kk;
+                        const auto q = detail::unpack_weight_block(ptrB, k, bits);
+                        float v = ptrA[k];
+                        if (input_scale_ptr != nullptr) {
+                            v *= input_scale_ptr[k];
+                        }
+                        sum += v * (static_cast<float>(q) * descale);
+                    }
+                }
+                sum *= alpha;
+                if (output_transpose != 0) {
+                    top_blob[static_cast<std::size_t>(j) * out_hstep + static_cast<std::size_t>(i)] = sum;
+                } else {
+                    top_blob[static_cast<std::size_t>(i) * out_hstep + static_cast<std::size_t>(j)] = sum;
+                }
+            }
+            return 0;
+        }
 
         MatT A_int8;
         A_int8.create(K, M, 1u, opt.workspace_allocator);
@@ -461,9 +517,39 @@ private:
                 const std::int32_t k0 = g * block_size;
                 const std::int32_t max_kk = block_size < K - k0 ? block_size : K - k0;
                 std::int32_t sum_int32 = 0;
-                for (std::int32_t kk = 0; kk < max_kk; ++kk) {
-                    const std::int32_t k = k0 + kk;
-                    sum_int32 += static_cast<std::int32_t>(ptrA[k]) * static_cast<std::int32_t>(ptrB[k]);
+                std::int32_t kk = 0;
+                if (bits == 8) {
+#if defined(__AVX2__)
+                    // Integer dot product, 16 lanes at a time. Integer addition
+                    // is associative, so the result is bit-identical to the
+                    // scalar accumulation used before.
+                    __m256i acc = _mm256_setzero_si256();
+                    for (; kk + 16 <= max_kk; kk += 16) {
+                        const __m128i a8 =
+                            _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptrA + k0 + kk));
+                        const __m128i b8 =
+                            _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptrB + k0 + kk));
+                        const __m256i a16 = _mm256_cvtepi8_epi16(a8);
+                        const __m256i b16 = _mm256_cvtepi8_epi16(b8);
+                        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(a16, b16));
+                    }
+                    __m128i sum128 =
+                        _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
+                    sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
+                    sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 4));
+                    sum_int32 = _mm_cvtsi128_si32(sum128);
+#endif
+                    for (; kk < max_kk; ++kk) {
+                        const std::int32_t k = k0 + kk;
+                        sum_int32 += static_cast<std::int32_t>(ptrA[k]) * static_cast<std::int32_t>(ptrB[k]);
+                    }
+                } else {
+                    const auto* packed_b = reinterpret_cast<const unsigned char*>(ptrB);
+                    for (; kk < max_kk; ++kk) {
+                        const std::int32_t k = k0 + kk;
+                        sum_int32 += static_cast<std::int32_t>(ptrA[k]) *
+                                     detail::unpack_weight_block(packed_b, k, bits);
+                    }
                 }
                 sum += static_cast<float>(sum_int32) * A_descale_ptr[g] / B_scale_ptr[g];
             }

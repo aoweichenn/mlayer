@@ -16,7 +16,54 @@
 
 #include <omp.h>
 
+#include <mlayer/int8_quantize.hpp>
+
 namespace mlayer {
+
+namespace detail {
+
+// Whole-2D-tensor dynamic quantization (ncnn SDPA int8 key/value path).
+template<typename MatT>
+inline void sdpa_quantize_2d(const MatT& blob, MatT& blob_int8, float& scale) {
+    float absmax = 0.0F;
+    for (std::int32_t i = 0; i < blob_int8.h; ++i) {
+        const float* ptr = blob.row(i);
+        for (std::int32_t j = 0; j < blob_int8.w; ++j) {
+            absmax = std::max(absmax, std::fabs(ptr[j]));
+        }
+    }
+    scale = absmax == 0.0F ? 1.0F : 127.0F / absmax;
+    for (std::int32_t i = 0; i < blob_int8.h; ++i) {
+        const float* ptr = blob.row(i);
+        auto* outptr = blob_int8.template row<std::int8_t>(i);
+        for (std::int32_t j = 0; j < blob_int8.w; ++j) {
+            outptr[j] = quantize_int8_scalar(ptr[j], scale);
+        }
+    }
+}
+
+// Per-row dynamic quantization (ncnn SDPA int8 query / attention path).
+template<typename MatT>
+inline void sdpa_quantize_2d_per_h(const MatT& blob, MatT& blob_int8, MatT& scales) {
+    for (std::int32_t i = 0; i < blob_int8.h; ++i) {
+        const float* ptr = blob.row(i);
+        float absmax = 0.0F;
+        for (std::int32_t j = 0; j < blob_int8.w; ++j) {
+            absmax = std::max(absmax, std::fabs(ptr[j]));
+        }
+        scales[i] = absmax == 0.0F ? 1.0F : 127.0F / absmax;
+    }
+    for (std::int32_t i = 0; i < blob_int8.h; ++i) {
+        const float* ptr = blob.row(i);
+        auto* outptr = blob_int8.template row<std::int8_t>(i);
+        const float scale = scales[i];
+        for (std::int32_t j = 0; j < blob_int8.w; ++j) {
+            outptr[j] = quantize_int8_scalar(ptr[j], scale);
+        }
+    }
+}
+
+}  // namespace detail
 
 template<typename LayerT, typename MatT, typename OptionT, typename ParamDictT>
 class SDPA : public LayerT {
@@ -27,17 +74,23 @@ public:
         this->attn_mask = 0;
         this->scale = 0.0F;
         this->kv_cache = 0;
+        this->int8_scale_term = 0;
     }
 
     std::int32_t load_param(const ParamDictT& pd) override {
         this->attn_mask = pd.get(5, 0);
         this->scale = pd.get(6, 0.0F);
         this->kv_cache = pd.get(7, 0);
+        this->int8_scale_term = pd.get(18, 0);
         return 0;
     }
 
     std::int32_t forward(const std::vector<MatT>& bottom_blobs, std::vector<MatT>& top_blobs,
                          const OptionT& opt) const override {
+        if (this->int8_scale_term != 0) {
+            return this->forward_int8(bottom_blobs, top_blobs, opt);
+        }
+
         const MatT& query = bottom_blobs[0];
         const MatT& cur_key = bottom_blobs[1];
         const MatT& cur_value = bottom_blobs[2];
@@ -168,9 +221,166 @@ public:
     }
 
 public:
+    // ncnn SDPA int8: dynamically quantize query (per row), key/value (whole
+    // tensor) per head, use int32 dot products, then dequantize.
+    std::int32_t forward_int8(const std::vector<MatT>& bottom_blobs, std::vector<MatT>& top_blobs,
+                              const OptionT& opt) const {
+        const MatT& query = bottom_blobs[0];
+        const MatT& cur_key = bottom_blobs[1];
+        const MatT& cur_value = bottom_blobs[2];
+        const MatT& attn_mask_blob = this->attn_mask != 0 ? bottom_blobs[3] : MatT();
+        const MatT& past_key = this->kv_cache != 0 ? bottom_blobs[this->attn_mask != 0 ? 4 : 3] : MatT();
+        const MatT& past_value = this->kv_cache != 0 ? bottom_blobs[this->attn_mask != 0 ? 5 : 4] : MatT();
+
+        const std::int32_t embed_dim = query.w;
+        const std::int32_t src_seqlen = query.h;
+        const std::int32_t num_heads = query.c;
+        const std::int32_t cur_seqlen = cur_key.h;
+        const std::int32_t num_group = cur_key.c;
+        const std::int32_t out_embed_dim = cur_value.w;
+        const std::int32_t past_seqlen = this->kv_cache != 0 ? past_key.h : 0;
+        const std::int32_t dst_seqlen = past_seqlen + cur_seqlen;
+
+        const float scale_value = this->scale == 0.0F ? 1.0F / std::sqrt(static_cast<float>(embed_dim))
+                                                      : this->scale;
+        const std::int32_t num_heads_per_group = num_heads / num_group;
+
+        MatT& top_blob = top_blobs[0];
+        top_blob.create(out_embed_dim, src_seqlen, num_heads, 4u, opt.blob_allocator);
+        MatT query_int8(embed_dim, src_seqlen, opt.num_threads, 1u, opt.workspace_allocator);
+        MatT key_int8(embed_dim, dst_seqlen, opt.num_threads, 1u, opt.workspace_allocator);
+        MatT value_int8(out_embed_dim, dst_seqlen, opt.num_threads, 1u, opt.workspace_allocator);
+        MatT qk_cross(dst_seqlen, src_seqlen, opt.num_threads, 4u, opt.workspace_allocator);
+        MatT qk_cross_int8(dst_seqlen, src_seqlen, opt.num_threads, 1u, opt.workspace_allocator);
+        MatT qk_scales(src_seqlen, 1, opt.num_threads, 4u, opt.workspace_allocator);
+        if (top_blob.empty() || query_int8.empty() || key_int8.empty() || value_int8.empty() ||
+            qk_cross.empty() || qk_cross_int8.empty() || qk_scales.empty()) {
+            return -100;
+        }
+
+        MatT key = cur_key;
+        MatT value = cur_value;
+        if (this->kv_cache != 0) {
+            MatT& cached_key = top_blobs[1];
+            MatT& cached_value = top_blobs[2];
+            const std::int32_t retk = this->create_or_grow_kvcache(
+                past_key, cached_key, dst_seqlen, num_group, embed_dim, cur_key.elemsize, cur_key.elempack, opt);
+            if (retk != 0) {
+                return retk;
+            }
+            const std::int32_t retv = this->create_or_grow_kvcache(
+                past_value, cached_value, dst_seqlen, num_group, out_embed_dim, cur_value.elemsize,
+                cur_value.elempack, opt);
+            if (retv != 0) {
+                return retv;
+            }
+#pragma omp parallel for num_threads(opt.num_threads)
+            for (std::int32_t q = 0; q < num_group; ++q) {
+                MatT key_head = cached_key.channel(q);
+                MatT value_head = cached_value.channel(q);
+                std::memcpy(key_head.row(past_seqlen), cur_key.channel(q),
+                            static_cast<std::size_t>(embed_dim) * static_cast<std::size_t>(cur_seqlen) *
+                                cur_key.elemsize);
+                std::memcpy(value_head.row(past_seqlen), cur_value.channel(q),
+                            static_cast<std::size_t>(out_embed_dim) * static_cast<std::size_t>(cur_seqlen) *
+                                cur_value.elemsize);
+            }
+            key = cached_key;
+            value = cached_value;
+        }
+
+#pragma omp parallel for num_threads(opt.num_threads)
+        for (std::int32_t q = 0; q < num_heads; ++q) {
+            const std::int32_t thread_index = static_cast<std::int32_t>(omp_get_thread_num());
+            const MatT query_head = query.channel(q);
+            const MatT key_head = key.channel(q / num_heads_per_group);
+            const MatT value_head = value.channel(q / num_heads_per_group);
+            MatT qk_cross_head = qk_cross.channel(thread_index);
+            MatT top_blob_head = top_blob.channel(q);
+
+            {
+                MatT query_head_int8 = query_int8.channel(thread_index);
+                MatT query_head_scales = qk_scales.channel(thread_index);
+                detail::sdpa_quantize_2d_per_h(query_head, query_head_int8, query_head_scales);
+
+                MatT key_head_int8 = key_int8.channel(thread_index);
+                float key_head_scale = 1.0F;
+                detail::sdpa_quantize_2d(key_head, key_head_int8, key_head_scale);
+
+                for (std::int32_t i = 0; i < src_seqlen; ++i) {
+                    const auto* qptr = query_head_int8.template row<std::int8_t>(i);
+                    float* outptr = qk_cross_head.row(i);
+                    const float qk_descale = 1.0F / (query_head_scales[i] * key_head_scale);
+                    for (std::int32_t j = 0; j < dst_seqlen; ++j) {
+                        const auto* kptr = key_head_int8.template row<std::int8_t>(j);
+                        int sum = 0;
+                        for (std::int32_t k = 0; k < embed_dim; ++k) {
+                            sum += static_cast<int>(qptr[k]) * static_cast<int>(kptr[k]);
+                        }
+                        outptr[j] = static_cast<float>(sum) * qk_descale * scale_value;
+                    }
+                }
+            }
+
+            if (this->attn_mask != 0) {
+                const MatT& maskm = attn_mask_blob.c > 1 ? attn_mask_blob.channel(q) : attn_mask_blob;
+                for (std::int32_t i = 0; i < src_seqlen; ++i) {
+                    const float* mptr = maskm.row(i);
+                    float* outptr = qk_cross_head.row(i);
+                    for (std::int32_t j = 0; j < dst_seqlen; ++j) {
+                        outptr[j] += mptr[j];
+                    }
+                }
+            }
+
+            for (std::int32_t i = 0; i < src_seqlen; ++i) {
+                float* ptr = qk_cross_head.row(i);
+                float maxv = -FLT_MAX;
+                for (std::int32_t j = 0; j < dst_seqlen; ++j) {
+                    maxv = std::max(maxv, ptr[j]);
+                }
+                float sum = 0.0F;
+                for (std::int32_t j = 0; j < dst_seqlen; ++j) {
+                    ptr[j] = std::exp(ptr[j] - maxv);
+                    sum += ptr[j];
+                }
+                for (std::int32_t j = 0; j < dst_seqlen; ++j) {
+                    ptr[j] /= sum;
+                }
+            }
+
+            {
+                MatT qk_head_int8 = qk_cross_int8.channel(thread_index);
+                MatT qk_head_scales = qk_scales.channel(thread_index);
+                detail::sdpa_quantize_2d_per_h(qk_cross_head, qk_head_int8, qk_head_scales);
+
+                MatT value_head_int8 = value_int8.channel(thread_index);
+                float value_head_scale = 1.0F;
+                detail::sdpa_quantize_2d(value_head, value_head_int8, value_head_scale);
+
+                for (std::int32_t i = 0; i < src_seqlen; ++i) {
+                    const auto* qkptr = qk_head_int8.template row<std::int8_t>(i);
+                    float* outptr = top_blob_head.row(i);
+                    const float qkv_descale = 1.0F / (qk_head_scales[i] * value_head_scale);
+                    for (std::int32_t j = 0; j < out_embed_dim; ++j) {
+                        int sum = 0;
+                        for (std::int32_t k = 0; k < dst_seqlen; ++k) {
+                            sum += static_cast<int>(qkptr[k]) *
+                                   static_cast<int>(value_head_int8.template row<std::int8_t>(k)[j]);
+                        }
+                        outptr[j] = static_cast<float>(sum) * qkv_descale;
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
+public:
     std::int32_t attn_mask;
     float scale;
     std::int32_t kv_cache;
+    std::int32_t int8_scale_term;
 
 private:
     static std::int32_t kvcache_capacity(std::int32_t current_capacity, std::int32_t new_seqlen,
