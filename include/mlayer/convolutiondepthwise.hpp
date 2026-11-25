@@ -447,7 +447,9 @@ std::int32_t ConvolutionDepthWise<LayerT, MatT, OptionT, ParamDictT, ModelBinT, 
 
     if constexpr (Int8)
     {
-        if (opt.use_int8_inference && weight_data.elemsize == (std::size_t)1u)
+        // int8 weights can only be interpreted by the int8 kernel; the
+        // use_int8_inference flag is not required for them.
+        if (weight_data.elemsize == (std::size_t)1u)
         {
             return forward_int8(bottom_blob, top_blob, opt);
         }
