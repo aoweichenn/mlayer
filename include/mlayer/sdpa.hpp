@@ -19,6 +19,9 @@
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 #include <mlayer/int8_quantize.hpp>
 
@@ -189,6 +192,16 @@ public:
                     for (; k < embed_dim; ++k) {
                         sum += qptr[k] * kptr[k];
                     }
+#elif defined(__ARM_NEON)
+                    float32x4_t acc = vdupq_n_f32(0.0F);
+                    std::int32_t k = 0;
+                    for (; k + 4 <= embed_dim; k += 4) {
+                        acc = vfmaq_f32(acc, vld1q_f32(qptr + k), vld1q_f32(kptr + k));
+                    }
+                    sum = vaddvq_f32(acc);
+                    for (; k < embed_dim; ++k) {
+                        sum += qptr[k] * kptr[k];
+                    }
 #else
                     for (std::int32_t k = 0; k < embed_dim; ++k) {
                         sum += qptr[k] * kptr[k];
@@ -240,6 +253,16 @@ public:
                         vptr += value_row_stride;
                     }
                     _mm256_storeu_ps(outptr + j, acc);
+                }
+#elif defined(__ARM_NEON)
+                for (; j + 4 <= out_embed_dim; j += 4) {
+                    float32x4_t acc = vdupq_n_f32(0.0F);
+                    const float* vptr = value_base + j;
+                    for (std::int32_t k = 0; k < dst_seqlen; ++k) {
+                        acc = vfmaq_f32(acc, vdupq_n_f32(qkptr[k]), vld1q_f32(vptr));
+                        vptr += value_row_stride;
+                    }
+                    vst1q_f32(outptr + j, acc);
                 }
 #endif
                 for (; j < out_embed_dim; ++j) {
