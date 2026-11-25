@@ -54,6 +54,8 @@ protected:
     }
 #endif
 
+    static std::int32_t convolution_3x3s1_winograd(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
+
     static std::int32_t convolution_im2col(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
 
 public:
@@ -426,6 +428,276 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
     return 0;
 }
 
+
+MLAYER_CONVOLUTION_TEMPLATE
+std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::convolution_3x3s1_winograd(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
+{
+    // F(2x2, 3x3) winograd for stride-1 fp32 convolution.
+    const std::int32_t outw = top_blob.w;
+    const std::int32_t outh = top_blob.h;
+    const std::int32_t inch = bottom_blob.c;
+    const std::int32_t outch = top_blob.c;
+    const std::int32_t K = inch * 9;
+    const float* weight_ptr = static_cast<const float*>(weight_data);
+
+    const std::int32_t tiles_x = (outw + 1) / 2;
+    const std::int32_t tiles_y = (outh + 1) / 2;
+    const std::int32_t num_tiles = tiles_x * tiles_y;
+    const std::int32_t pad_w = tiles_x * 2 + 2;
+    const std::int32_t pad_h = tiles_y * 2 + 2;
+    constexpr std::int32_t kChannelBlock = 8;
+
+    MatT input_pad(pad_w, pad_h, inch, 4u, opt.workspace_allocator);
+    if (input_pad.empty())
+    {
+        return -100;
+    }
+    const std::int32_t copy_w = std::min(pad_w, bottom_blob.w);
+    const std::int32_t copy_h = std::min(pad_h, bottom_blob.h);
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (std::int32_t q = 0; q < inch; q++)
+    {
+        for (std::int32_t y = 0; y < pad_h; y++)
+        {
+            float* dst = input_pad.channel(q).row(y);
+            if (y < copy_h)
+            {
+                const float* src = bottom_blob.channel(q).row(y);
+                for (std::int32_t x = 0; x < copy_w; x++)
+                {
+                    dst[x] = src[x];
+                }
+                for (std::int32_t x = copy_w; x < pad_w; x++)
+                {
+                    dst[x] = 0.f;
+                }
+            }
+            else
+            {
+                for (std::int32_t x = 0; x < pad_w; x++)
+                {
+                    dst[x] = 0.f;
+                }
+            }
+        }
+    }
+
+    // Transformed weights, blocked as [pblock][pos][q][lane] so one output
+    // channel block streams contiguously while the tile loop runs.
+    const std::int32_t pblocks = (outch + kChannelBlock - 1) / kChannelBlock;
+    MatT U(static_cast<std::int32_t>(static_cast<std::size_t>(pblocks) * 16u * static_cast<std::size_t>(inch) *
+                                     static_cast<std::size_t>(kChannelBlock)),
+           4u, opt.workspace_allocator);
+    if (U.empty())
+    {
+        return -100;
+    }
+    float* up = U;
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (std::int32_t p = 0; p < outch; p++)
+    {
+        float* uph = up + static_cast<std::size_t>(p / kChannelBlock) * 16 * inch * kChannelBlock +
+                     (p % kChannelBlock);
+        for (std::int32_t q = 0; q < inch; q++)
+        {
+            const float* g = weight_ptr + p * K + q * 9;
+            const float g00 = g[0], g01 = g[1], g02 = g[2];
+            const float g10 = g[3], g11 = g[4], g12 = g[5];
+            const float g20 = g[6], g21 = g[7], g22 = g[8];
+
+            float t[4][3];
+            t[0][0] = g00; t[0][1] = g01; t[0][2] = g02;
+            t[1][0] = (g00 + g10 + g20) * 0.5f;
+            t[1][1] = (g01 + g11 + g21) * 0.5f;
+            t[1][2] = (g02 + g12 + g22) * 0.5f;
+            t[2][0] = (g00 - g10 + g20) * 0.5f;
+            t[2][1] = (g01 - g11 + g21) * 0.5f;
+            t[2][2] = (g02 - g12 + g22) * 0.5f;
+            t[3][0] = g20; t[3][1] = g21; t[3][2] = g22;
+
+            for (std::int32_t i = 0; i < 4; i++)
+            {
+                const float u0 = t[i][0];
+                const float u1 = (t[i][0] + t[i][1] + t[i][2]) * 0.5f;
+                const float u2 = (t[i][0] - t[i][1] + t[i][2]) * 0.5f;
+                const float u3 = t[i][2];
+                uph[((i * 4 + 0) * inch + q) * kChannelBlock] = u0;
+                uph[((i * 4 + 1) * inch + q) * kChannelBlock] = u1;
+                uph[((i * 4 + 2) * inch + q) * kChannelBlock] = u2;
+                uph[((i * 4 + 3) * inch + q) * kChannelBlock] = u3;
+            }
+        }
+    }
+
+    // Input transform for every tile.
+    MatT V(static_cast<std::int32_t>(static_cast<std::size_t>(num_tiles) * 16u * static_cast<std::size_t>(inch)),
+           4u, opt.workspace_allocator);
+    if (V.empty())
+    {
+        return -100;
+    }
+    float* vp = V;
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (std::int32_t tile = 0; tile < num_tiles; tile++)
+    {
+        const std::int32_t ty = tile / tiles_x;
+        const std::int32_t tx = tile % tiles_x;
+        float* vtile = vp + static_cast<std::size_t>(tile) * 16 * inch;
+
+        for (std::int32_t q = 0; q < inch; q++)
+        {
+            const MatT src = input_pad.channel(q);
+            const float* d0 = src.row(ty * 2 + 0) + tx * 2;
+            const float* d1 = src.row(ty * 2 + 1) + tx * 2;
+            const float* d2 = src.row(ty * 2 + 2) + tx * 2;
+            const float* d3 = src.row(ty * 2 + 3) + tx * 2;
+
+            float t0[4], t1[4], t2[4], t3[4];
+            for (std::int32_t c = 0; c < 4; c++)
+            {
+                t0[c] = d0[c] - d2[c];
+                t1[c] = d1[c] + d2[c];
+                t2[c] = d2[c] - d1[c];
+                t3[c] = d1[c] - d3[c];
+            }
+            const float* tr[4] = {t0, t1, t2, t3};
+            for (std::int32_t i = 0; i < 4; i++)
+            {
+                const float* r = tr[i];
+                vtile[static_cast<std::size_t>((i * 4 + 0) * inch + q)] = r[0] - r[2];
+                vtile[static_cast<std::size_t>((i * 4 + 1) * inch + q)] = r[1] + r[2];
+                vtile[static_cast<std::size_t>((i * 4 + 2) * inch + q)] = r[2] - r[1];
+                vtile[static_cast<std::size_t>((i * 4 + 3) * inch + q)] = r[1] - r[3];
+            }
+        }
+    }
+
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (std::int32_t pb = 0; pb < pblocks; pb++)
+    {
+        const std::int32_t p0 = pb * kChannelBlock;
+        const std::int32_t np = outch - p0 < kChannelBlock ? outch - p0 : kChannelBlock;
+        const float* upb = up + static_cast<std::size_t>(pb) * 16 * inch * kChannelBlock;
+
+        float mbuf[16 * kChannelBlock];
+        for (std::int32_t tile = 0; tile < num_tiles; tile++)
+        {
+            const float* vtile = vp + static_cast<std::size_t>(tile) * 16 * inch;
+
+            for (std::int32_t pos = 0; pos < 16; pos++)
+            {
+                const float* vrow = vtile + static_cast<std::size_t>(pos) * inch;
+                const float* urow = upb + static_cast<std::size_t>(pos) * inch * kChannelBlock;
+                float* mrow = mbuf + static_cast<std::size_t>(pos) * kChannelBlock;
+#if defined(__AVX2__)
+                if (np == kChannelBlock)
+                {
+                    for (std::int32_t g = 0; g < kChannelBlock; g += 8)
+                    {
+                        __m256 acc = _mm256_setzero_ps();
+                        for (std::int32_t q = 0; q < inch; q++)
+                        {
+                            const __m256 v = _mm256_set1_ps(vrow[q]);
+                            acc = _mm256_fmadd_ps(v, _mm256_loadu_ps(urow + q * kChannelBlock + g), acc);
+                        }
+                        _mm256_storeu_ps(mrow + g, acc);
+                    }
+                    continue;
+                }
+#endif
+                for (std::int32_t p = 0; p < np; p++)
+                {
+                    float sum = 0.f;
+                    for (std::int32_t q = 0; q < inch; q++)
+                    {
+                        sum += vrow[q] * urow[q * kChannelBlock + p];
+                    }
+                    mrow[p] = sum;
+                }
+            }
+
+            const std::int32_t ty = tile / tiles_x;
+            const std::int32_t tx = tile % tiles_x;
+            const std::int32_t oy = ty * 2;
+            const std::int32_t ox = tx * 2;
+
+            float yv[4][kChannelBlock];
+#if defined(__AVX2__)
+            if (np == kChannelBlock)
+            {
+                for (std::int32_t g = 0; g < kChannelBlock; g += 8)
+                {
+                    __m256 r0[4];
+                    __m256 r1[4];
+                    for (std::int32_t i = 0; i < 4; i++)
+                    {
+                        const __m256 m0 = _mm256_loadu_ps(mbuf + (i * 4 + 0) * kChannelBlock + g);
+                        const __m256 m1 = _mm256_loadu_ps(mbuf + (i * 4 + 1) * kChannelBlock + g);
+                        const __m256 m2 = _mm256_loadu_ps(mbuf + (i * 4 + 2) * kChannelBlock + g);
+                        const __m256 m3 = _mm256_loadu_ps(mbuf + (i * 4 + 3) * kChannelBlock + g);
+                        r0[i] = _mm256_add_ps(_mm256_add_ps(m0, m1), m2);
+                        r1[i] = _mm256_sub_ps(_mm256_sub_ps(m1, m2), m3);
+                    }
+                    for (std::int32_t row = 0; row < 2; row++)
+                    {
+                        const __m256* rr = row == 0 ? r0 : r1;
+                        _mm256_storeu_ps(yv[row * 2 + 0] + g,
+                                         _mm256_add_ps(_mm256_add_ps(rr[0], rr[1]), rr[2]));
+                        _mm256_storeu_ps(yv[row * 2 + 1] + g,
+                                         _mm256_sub_ps(_mm256_sub_ps(rr[1], rr[2]), rr[3]));
+                    }
+                }
+            }
+            else
+#endif
+            {
+                for (std::int32_t p = 0; p < np; p++)
+                {
+                    float r0[4], r1[4];
+                    for (std::int32_t i = 0; i < 4; i++)
+                    {
+                        r0[i] = mbuf[(i * 4 + 0) * kChannelBlock + p] +
+                                mbuf[(i * 4 + 1) * kChannelBlock + p] +
+                                mbuf[(i * 4 + 2) * kChannelBlock + p];
+                        r1[i] = mbuf[(i * 4 + 1) * kChannelBlock + p] -
+                                mbuf[(i * 4 + 2) * kChannelBlock + p] -
+                                mbuf[(i * 4 + 3) * kChannelBlock + p];
+                    }
+                    yv[0][p] = r0[0] + r0[1] + r0[2];
+                    yv[1][p] = r0[1] - r0[2] - r0[3];
+                    yv[2][p] = r1[0] + r1[1] + r1[2];
+                    yv[3][p] = r1[1] - r1[2] - r1[3];
+                }
+            }
+
+            for (std::int32_t t = 0; t < np; t++)
+            {
+                const std::int32_t p = p0 + t;
+                const float bias = bias_data.empty() ? 0.f : bias_data[p];
+                float* op = top_blob.channel(p);
+                if (oy < outh && ox < outw)
+                {
+                    op[oy * outw + ox] = Activation(yv[0][t] + bias, activation_type, activation_params);
+                }
+                if (oy < outh && ox + 1 < outw)
+                {
+                    op[oy * outw + ox + 1] = Activation(yv[1][t] + bias, activation_type, activation_params);
+                }
+                if (oy + 1 < outh && ox < outw)
+                {
+                    op[(oy + 1) * outw + ox] = Activation(yv[2][t] + bias, activation_type, activation_params);
+                }
+                if (oy + 1 < outh && ox + 1 < outw)
+                {
+                    op[(oy + 1) * outw + ox + 1] = Activation(yv[3][t] + bias, activation_type, activation_params);
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
 MLAYER_CONVOLUTION_TEMPLATE
 std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::convolution_im2col(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
 {
@@ -652,6 +924,12 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
     if (kernel_w == 1 && kernel_h == 1 && stride_w == 1 && stride_h == 1 && dilation_w == 1 && dilation_h == 1)
     {
         return convolution_1x1(bottom_blob_bordered, top_blob, weight_data, bias_data, activation_type, activation_params, opt);
+    }
+
+    if (kernel_w == 3 && kernel_h == 3 && stride_w == 1 && stride_h == 1 && dilation_w == 1 && dilation_h == 1 &&
+        elemsize == 4u && num_output >= 8 && bottom_blob_bordered.c >= 4)
+    {
+        return convolution_3x3s1_winograd(bottom_blob_bordered, top_blob, weight_data, bias_data, activation_type, activation_params, opt);
     }
 
     const std::size_t im2col_bytes = static_cast<std::size_t>(kernel_w) * kernel_h * bottom_blob_bordered.c *
