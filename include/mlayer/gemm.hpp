@@ -733,6 +733,39 @@ private:
                         sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 4));
                         sums_int32[ii] = _mm_cvtsi128_si32(sum128);
                     }
+#elif defined(__ARM_NEON)
+                    const int8x16_t v8s = vdupq_n_s8(8);
+                    const uint8x16_t v8u = vreinterpretq_u8_s8(v8s);
+                    const uint8x16_t v0f = vdupq_n_u8(0x0F);
+                    int32x4_t accv[kMTile];
+                    for (std::int32_t ii = 0; ii < mi; ++ii) {
+                        accv[ii] = vdupq_n_s32(0);
+                    }
+                    for (; kk + 32 <= max_kk; kk += 32) {
+                        const uint8x16_t p = vld1q_u8(packed_b + (k0 + kk) / 2);
+                        const uint8x16_t lo = vandq_u8(p, v0f);
+                        const uint8x16_t hi = vandq_u8(vshrq_n_u8(p, 4), v0f);
+                        const int8x16_t lo_s = vsubq_s8(vreinterpretq_s8_u8(veorq_u8(lo, v8u)), v8s);
+                        const int8x16_t hi_s = vsubq_s8(vreinterpretq_s8_u8(veorq_u8(hi, v8u)), v8s);
+                        const int8x16_t b0 = vzip1q_s8(lo_s, hi_s);
+                        const int8x16_t b1 = vzip2q_s8(lo_s, hi_s);
+                        for (std::int32_t ii = 0; ii < mi; ++ii) {
+                            const int8x16_t a0 = vld1q_s8(arows[ii] + k0 + kk);
+                            const int8x16_t a1 = vld1q_s8(arows[ii] + k0 + kk + 16);
+#if defined(__ARM_FEATURE_DOTPROD)
+                            accv[ii] = vdotq_s32(accv[ii], a0, b0);
+                            accv[ii] = vdotq_s32(accv[ii], a1, b1);
+#else
+                            accv[ii] = vpadalq_s16(accv[ii], vmull_s8(vget_low_s8(a0), vget_low_s8(b0)));
+                            accv[ii] = vpadalq_s16(accv[ii], vmull_s8(vget_high_s8(a0), vget_high_s8(b0)));
+                            accv[ii] = vpadalq_s16(accv[ii], vmull_s8(vget_low_s8(a1), vget_low_s8(b1)));
+                            accv[ii] = vpadalq_s16(accv[ii], vmull_s8(vget_high_s8(a1), vget_high_s8(b1)));
+#endif
+                        }
+                    }
+                    for (std::int32_t ii = 0; ii < mi; ++ii) {
+                        sums_int32[ii] = vaddvq_s32(accv[ii]);
+                    }
 #endif
                     for (; kk < max_kk; ++kk) {
                         const std::int32_t k = k0 + kk;
