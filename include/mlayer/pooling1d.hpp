@@ -6,7 +6,7 @@
 #define MLAYER_POOLING1D_HPP
 
 #include <algorithm>
-#include <cfloat>
+#include <limits>
 #include <cmath>
 #include <cstdint>
 
@@ -101,25 +101,59 @@ std::int32_t Pooling1D<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(con
         return 0;
     }
 
-    std::int32_t outw = 0;
     if (this->adaptive_pooling != 0) {
-        outw = this->out_w;
-    } else if (this->pad_mode == 0) {
-        if (this->kernel_w <= 0) {
+        const std::int32_t outw = this->out_w;
+        if (outw <= 0) {
             return -1;
         }
-        const std::int32_t wtail = (w + this->pad_left + this->pad_right - this->kernel_w) % this->stride_w;
-        const std::int32_t padtail = wtail != 0 ? this->stride_w - wtail : 0;
-        outw = (w + this->pad_left + this->pad_right + padtail - this->kernel_w) / this->stride_w + 1;
-    } else if (this->pad_mode == 1) {
-        if (this->kernel_w <= 0) {
-            return -1;
+        top_blob.create(outw, channels, elemsize, opt.blob_allocator);
+        if (top_blob.empty()) {
+            return -100;
         }
-        outw = (w - this->kernel_w) / this->stride_w + 1;
-    } else {
-        // SAME modes are not needed by the supported models.
+#pragma omp parallel for num_threads(opt.num_threads)
+        for (std::int32_t q = 0; q < channels; ++q) {
+            const float* inptr = bottom_blob.row(q);
+            float* outptr = top_blob.row(q);
+            for (std::int32_t j = 0; j < outw; ++j) {
+                const std::int32_t iw0 = w * j / outw;
+                const std::int32_t iw1 = (w * (j + 1) + outw - 1) / outw;
+                const std::int32_t wk = iw1 - iw0;
+                float acc = this->pooling_type == 0 ? inptr[iw0] : 0.0F;
+                for (std::int32_t iw = iw0; iw < iw1; ++iw) {
+                    acc = this->pooling_type == 0 ? std::max(acc, inptr[iw]) : acc + inptr[iw];
+                }
+                outptr[j] = this->pooling_type == 0 ? acc : acc / static_cast<float>(wk);
+            }
+        }
+        return 0;
+    }
+
+    if (this->kernel_w <= 0 || this->stride_w <= 0) {
         return -1;
     }
+    std::int32_t padtail_w = 0;
+    std::int32_t padded_w = 0;
+    std::int32_t left_eff = 0;
+    if (this->pad_mode == 0) {
+        const std::int32_t wtail = (w + this->pad_left + this->pad_right - this->kernel_w) % this->stride_w;
+        padtail_w = wtail != 0 ? this->stride_w - wtail : 0;
+        padded_w = w + this->pad_left + this->pad_right + padtail_w;
+        left_eff = this->pad_left;
+    } else if (this->pad_mode == 1) {
+        padded_w = w + this->pad_left + this->pad_right;
+        left_eff = this->pad_left;
+    } else if (this->pad_mode == 2 || this->pad_mode == 3) {
+        std::int32_t wpad = this->kernel_w + (w - 1) / this->stride_w * this->stride_w - w;
+        wpad = std::max(wpad, 0);
+        padded_w = w + wpad;
+        left_eff = this->pad_mode == 2 ? wpad / 2 : wpad - wpad / 2;
+    } else {
+        return -1;
+    }
+    if (padded_w < this->kernel_w) {
+        return -1;
+    }
+    const std::int32_t outw = (padded_w - this->kernel_w) / this->stride_w + 1;
     if (outw <= 0) {
         return -1;
     }
@@ -129,41 +163,36 @@ std::int32_t Pooling1D<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(con
         return -100;
     }
 
+    const float pad_value = this->pooling_type == 0 ? -std::numeric_limits<float>::max() : 0.0F;
+    const std::int32_t count_x0 = this->pad_left;
+    const std::int32_t count_x1 = padded_w - this->pad_right - padtail_w;
+
 #pragma omp parallel for num_threads(opt.num_threads)
     for (std::int32_t q = 0; q < channels; ++q) {
-        const float* ptr = bottom_blob.row(q);
+        const float* inptr = bottom_blob.row(q);
         float* outptr = top_blob.row(q);
-        for (std::int32_t i = 0; i < outw; ++i) {
-            std::int32_t wstart = 0;
-            std::int32_t wend = 0;
-            std::int32_t ksize = 0;
-            if (this->adaptive_pooling != 0) {
-                const std::int32_t start = static_cast<std::int32_t>(std::floor(static_cast<float>(i) * w / outw));
-                const std::int32_t end =
-                    static_cast<std::int32_t>(std::ceil(static_cast<float>(i + 1) * w / outw));
-                wstart = start;
-                wend = end;
-                ksize = end - start;
-            } else {
-                wstart = i * this->stride_w - this->pad_left;
-                wend = wstart + this->kernel_w;
-                ksize = this->kernel_w;
-            }
-            std::int32_t sstart = std::max(wstart, 0);
-            std::int32_t send = std::min(wend, w);
-            if (this->adaptive_pooling != 0) {
-                sstart = wstart;
-                send = wend;
-            }
-            float acc = this->pooling_type == 0 ? -FLT_MAX : 0.0F;
-            for (std::int32_t x = sstart; x < send; ++x) {
-                acc = this->pooling_type == 0 ? std::max(acc, ptr[x]) : acc + ptr[x];
+        for (std::int32_t j = 0; j < outw; ++j) {
+            const std::int32_t x0 = j * this->stride_w;
+            float acc = this->pooling_type == 0 ? -std::numeric_limits<float>::max() : 0.0F;
+            std::int32_t area = 0;
+            for (std::int32_t k = 0; k < this->kernel_w; ++k) {
+                const std::int32_t sp = x0 + k;
+                const std::int32_t sx = sp - left_eff;
+                const float v = (sx >= 0 && sx < w) ? inptr[sx] : pad_value;
+                if (this->pooling_type == 0) {
+                    acc = std::max(acc, v);
+                } else if (this->avgpool_count_include_pad != 0) {
+                    acc += v;
+                } else if (sp >= count_x0 && sp < count_x1) {
+                    acc += v;
+                    ++area;
+                }
             }
             if (this->pooling_type == 1) {
-                const std::int32_t count = this->avgpool_count_include_pad != 0 ? ksize : (send - sstart);
-                acc = count > 0 ? acc / static_cast<float>(count) : 0.0F;
+                acc = this->avgpool_count_include_pad != 0 ? acc / static_cast<float>(this->kernel_w)
+                                                           : acc / static_cast<float>(area);
             }
-            outptr[i] = this->pooling_type == 0 && (send <= sstart) ? 0.0F : acc;
+            outptr[j] = acc;
         }
     }
     return 0;

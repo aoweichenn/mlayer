@@ -118,11 +118,13 @@ std::int32_t Cast<LayerT, MatT, OptionT, ParamDictT>::forward(const MatT& bottom
     const std::int32_t d = bottom_blob.d;
     const std::int32_t channels = bottom_blob.c;
 
-    if (this->type_from == 3) {
-        // int8 source is not used by any model this runtime loads.
+    if (this->type_to != 1 && this->type_to != 2 && this->type_to != 3 && this->type_to != 4) {
         return -1;
     }
-    if (this->type_to != 1 && this->type_to != 2 && this->type_to != 4) {
+    if (this->type_from == 3 && this->type_to != 1) {
+        return -1;
+    }
+    if (this->type_from != 1 && this->type_from != 3) {
         return -1;
     }
 
@@ -142,17 +144,57 @@ std::int32_t Cast<LayerT, MatT, OptionT, ParamDictT>::forward(const MatT& bottom
         return -100;
     }
 
-    const std::int32_t count = w * h * d * channels;
-    const auto* src = static_cast<const float*>(bottom_blob.data);
+    const std::int32_t plane = w * h * d;
+    const std::int32_t groups = dims >= 3 ? channels : 1;
+    if (this->type_from == 3) {
 #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t i = 0; i < count; ++i) {
-        if (this->type_to == 2) {
-            static_cast<std::uint16_t*>(top_blob.data)[i] = detail::cast_float_to_half(src[i]);
-        } else {
-            // bfloat16: truncate the mantissa
-            std::uint32_t bits = 0;
-            std::memcpy(&bits, &src[i], sizeof(bits));
-            static_cast<std::uint16_t*>(top_blob.data)[i] = static_cast<std::uint16_t>(bits >> 16);
+        for (std::int32_t q = 0; q < groups; ++q) {
+            const auto* src = dims >= 2 ? static_cast<const std::int8_t*>(bottom_blob.channel(q))
+                                        : static_cast<const std::int8_t*>(bottom_blob.data);
+            auto* dst = dims >= 2 ? static_cast<float*>(top_blob.channel(q))
+                                  : static_cast<float*>(top_blob.data);
+            for (std::int32_t i = 0; i < plane; ++i) {
+                dst[i] = static_cast<float>(src[i]);
+            }
+        }
+        return 0;
+    }
+    if (this->type_to == 3) {
+        // ncnn round-half-away-from-zero, clamped to [-128, 127].
+#pragma omp parallel for num_threads(opt.num_threads)
+        for (std::int32_t q = 0; q < groups; ++q) {
+            const auto* src = dims >= 2 ? static_cast<const float*>(bottom_blob.channel(q))
+                                        : static_cast<const float*>(bottom_blob.data);
+            auto* dst = dims >= 2 ? static_cast<std::int8_t*>(top_blob.channel(q))
+                                  : static_cast<std::int8_t*>(top_blob.data);
+            for (std::int32_t i = 0; i < plane; ++i) {
+                float tmp = src[i] >= 0.0F ? src[i] + 0.5F : src[i] - 0.5F;
+                if (tmp > 127.0F) {
+                    tmp = 127.0F;
+                }
+                if (tmp < -128.0F) {
+                    tmp = -128.0F;
+                }
+                dst[i] = static_cast<std::int8_t>(tmp);
+            }
+        }
+        return 0;
+    }
+#pragma omp parallel for num_threads(opt.num_threads)
+    for (std::int32_t q = 0; q < groups; ++q) {
+        const auto* src = dims >= 2 ? static_cast<const float*>(bottom_blob.channel(q))
+                                    : static_cast<const float*>(bottom_blob.data);
+        auto* dst = dims >= 2 ? static_cast<std::uint16_t*>(top_blob.channel(q))
+                              : static_cast<std::uint16_t*>(top_blob.data);
+        for (std::int32_t i = 0; i < plane; ++i) {
+            if (this->type_to == 2) {
+                dst[i] = detail::cast_float_to_half(src[i]);
+            } else {
+                // bfloat16: truncate the mantissa
+                std::uint32_t bits = 0;
+                std::memcpy(&bits, &src[i], sizeof(bits));
+                dst[i] = static_cast<std::uint16_t>(bits >> 16);
+            }
         }
     }
     return 0;

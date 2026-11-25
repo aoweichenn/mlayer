@@ -6,7 +6,7 @@
 #define MLAYER_POOLING3D_HPP
 
 #include <algorithm>
-#include <cfloat>
+#include <limits>
 #include <cmath>
 #include <cstdint>
 
@@ -133,38 +133,113 @@ std::int32_t Pooling3D<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(con
         return 0;
     }
 
-    std::int32_t outw = 0;
-    std::int32_t outh = 0;
-    std::int32_t outd = 0;
+    constexpr std::int32_t kAdaptiveKeep = -233;
+    if (this->adaptive_pooling != 0) {
+        const std::int32_t outw = this->out_w == kAdaptiveKeep ? w : this->out_w;
+        const std::int32_t outh = this->out_h == kAdaptiveKeep ? h : this->out_h;
+        const std::int32_t outd = this->out_d == kAdaptiveKeep ? d : this->out_d;
+        if (outw == w && outh == h && outd == d) {
+            top_blob = bottom_blob;
+            return 0;
+        }
+        top_blob.create(outw, outh, outd, channels, elemsize, opt.blob_allocator);
+        if (top_blob.empty()) {
+            return -100;
+        }
+#pragma omp parallel for num_threads(opt.num_threads)
+        for (std::int32_t q = 0; q < channels; ++q) {
+            const float* inptr = bottom_blob.channel(q);
+            MatT out = top_blob.channel(q);
+            for (std::int32_t oz = 0; oz < outd; ++oz) {
+                const std::int32_t id0 = d * oz / outd;
+                const std::int32_t id1 = (d * (oz + 1) + outd - 1) / outd;
+                const std::int32_t dk = id1 - id0;
+                for (std::int32_t oy = 0; oy < outh; ++oy) {
+                    const std::int32_t ih0 = h * oy / outh;
+                    const std::int32_t ih1 = (h * (oy + 1) + outh - 1) / outh;
+                    const std::int32_t hk = ih1 - ih0;
+                    for (std::int32_t ox = 0; ox < outw; ++ox) {
+                        const std::int32_t iw0 = w * ox / outw;
+                        const std::int32_t iw1 = (w * (ox + 1) + outw - 1) / outw;
+                        const std::int32_t wk = iw1 - iw0;
+                        float acc = this->pooling_type == 0
+                                        ? inptr[id0 * w * h + ih0 * w + iw0]
+                                        : 0.0F;
+                        for (std::int32_t id = id0; id < id1; ++id) {
+                            for (std::int32_t ih = ih0; ih < ih1; ++ih) {
+                                for (std::int32_t iw = iw0; iw < iw1; ++iw) {
+                                    const float v = inptr[id * w * h + ih * w + iw];
+                                    acc = this->pooling_type == 0 ? std::max(acc, v) : acc + v;
+                                }
+                            }
+                        }
+                        if (this->pooling_type == 1) {
+                            acc = acc / static_cast<float>(hk) / static_cast<float>(wk) /
+                                  static_cast<float>(dk);
+                        }
+                        out.depth(oz).row(oy)[ox] = acc;
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
     std::int32_t padtail_w = 0;
     std::int32_t padtail_h = 0;
     std::int32_t padtail_d = 0;
-    if (this->adaptive_pooling != 0) {
-        outw = this->out_w;
-        outh = this->out_h;
-        outd = this->out_d;
-    } else if (this->pad_mode == 0) {
-        if (this->kernel_w <= 0) {
+    std::int32_t padded_w = 0;
+    std::int32_t padded_h = 0;
+    std::int32_t padded_d = 0;
+    std::int32_t left_eff = 0;
+    std::int32_t top_eff = 0;
+    std::int32_t front_eff = 0;
+    if (this->pad_mode == 0) {
+        if (this->kernel_w <= 0 || this->stride_w <= 0) {
             return -1;
         }
-        // ncnn "full" padding extends the right/bottom/behind side so the
-        // window fits an integer number of strides.
         const std::int32_t wtail = (w + this->pad_left + this->pad_right - this->kernel_w) % this->stride_w;
         const std::int32_t htail = (h + this->pad_top + this->pad_bottom - this->kernel_h) % this->stride_h;
         const std::int32_t dtail = (d + this->pad_front + this->pad_behind - this->kernel_d) % this->stride_d;
         padtail_w = wtail != 0 ? this->stride_w - wtail : 0;
         padtail_h = htail != 0 ? this->stride_h - htail : 0;
         padtail_d = dtail != 0 ? this->stride_d - dtail : 0;
-        outw = (w + this->pad_left + this->pad_right + padtail_w - this->kernel_w) / this->stride_w + 1;
-        outh = (h + this->pad_top + this->pad_bottom + padtail_h - this->kernel_h) / this->stride_h + 1;
-        outd = (d + this->pad_front + this->pad_behind + padtail_d - this->kernel_d) / this->stride_d + 1;
+        padded_w = w + this->pad_left + this->pad_right + padtail_w;
+        padded_h = h + this->pad_top + this->pad_bottom + padtail_h;
+        padded_d = d + this->pad_front + this->pad_behind + padtail_d;
+        left_eff = this->pad_left;
+        top_eff = this->pad_top;
+        front_eff = this->pad_front;
     } else if (this->pad_mode == 1) {
-        outw = (w - this->kernel_w) / this->stride_w + 1;
-        outh = (h - this->kernel_h) / this->stride_h + 1;
-        outd = (d - this->kernel_d) / this->stride_d + 1;
+        padded_w = w + this->pad_left + this->pad_right;
+        padded_h = h + this->pad_top + this->pad_bottom;
+        padded_d = d + this->pad_front + this->pad_behind;
+        left_eff = this->pad_left;
+        top_eff = this->pad_top;
+        front_eff = this->pad_front;
+    } else if (this->pad_mode == 2 || this->pad_mode == 3) {
+        std::int32_t wpad = this->kernel_w + (w - 1) / this->stride_w * this->stride_w - w;
+        std::int32_t hpad = this->kernel_h + (h - 1) / this->stride_h * this->stride_h - h;
+        std::int32_t dpad = this->kernel_d + (d - 1) / this->stride_d * this->stride_d - d;
+        wpad = std::max(wpad, 0);
+        hpad = std::max(hpad, 0);
+        dpad = std::max(dpad, 0);
+        padded_w = w + wpad;
+        padded_h = h + hpad;
+        padded_d = d + dpad;
+        left_eff = this->pad_mode == 2 ? wpad / 2 : wpad - wpad / 2;
+        top_eff = this->pad_mode == 2 ? hpad / 2 : hpad - hpad / 2;
+        front_eff = this->pad_mode == 2 ? dpad / 2 : dpad - dpad / 2;
     } else {
         return -1;
     }
+    if (padded_w < this->kernel_w || padded_h < this->kernel_h || padded_d < this->kernel_d) {
+        return -1;
+    }
+
+    const std::int32_t outw = (padded_w - this->kernel_w) / this->stride_w + 1;
+    const std::int32_t outh = (padded_h - this->kernel_h) / this->stride_h + 1;
+    const std::int32_t outd = (padded_d - this->kernel_d) / this->stride_d + 1;
     if (outw <= 0 || outh <= 0 || outd <= 0) {
         return -1;
     }
@@ -174,63 +249,57 @@ std::int32_t Pooling3D<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(con
         return -100;
     }
 
+    const float pad_value =
+        this->pooling_type == 0 ? -std::numeric_limits<float>::max() : 0.0F;
+    const std::int32_t maxk = this->kernel_w * this->kernel_h * this->kernel_d;
+    const std::int32_t count_x0 = this->pad_left;
+    const std::int32_t count_y0 = this->pad_top;
+    const std::int32_t count_z0 = this->pad_front;
+    const std::int32_t count_x1 = padded_w - this->pad_right - padtail_w;
+    const std::int32_t count_y1 = padded_h - this->pad_bottom - padtail_h;
+    const std::int32_t count_z1 = padded_d - this->pad_behind - padtail_d;
+
 #pragma omp parallel for num_threads(opt.num_threads)
     for (std::int32_t q = 0; q < channels; ++q) {
         const MatT image = bottom_blob.channel(q);
         MatT out = top_blob.channel(q);
         for (std::int32_t oz = 0; oz < outd; ++oz) {
+            const std::int32_t z0 = oz * this->stride_d;
             for (std::int32_t oy = 0; oy < outh; ++oy) {
+                const std::int32_t y0 = oy * this->stride_h;
                 for (std::int32_t ox = 0; ox < outw; ++ox) {
-                    std::int32_t ws = 0;
-                    std::int32_t hs = 0;
-                    std::int32_t ds = 0;
-                    std::int32_t we = 0;
-                    std::int32_t he = 0;
-                    std::int32_t de = 0;
-                    std::int32_t ksize = 0;
-                    if (this->adaptive_pooling != 0) {
-                        ws = static_cast<std::int32_t>(std::floor(static_cast<float>(ox) * w / outw));
-                        we = static_cast<std::int32_t>(std::ceil(static_cast<float>(ox + 1) * w / outw));
-                        hs = static_cast<std::int32_t>(std::floor(static_cast<float>(oy) * h / outh));
-                        he = static_cast<std::int32_t>(std::ceil(static_cast<float>(oy + 1) * h / outh));
-                        ds = static_cast<std::int32_t>(std::floor(static_cast<float>(oz) * d / outd));
-                        de = static_cast<std::int32_t>(std::ceil(static_cast<float>(oz + 1) * d / outd));
-                        ksize = (we - ws) * (he - hs) * (de - ds);
-                    } else {
-                        ws = ox * this->stride_w - this->pad_left;
-                        hs = oy * this->stride_h - this->pad_top;
-                        ds = oz * this->stride_d - this->pad_front;
-                        we = ws + this->kernel_w;
-                        he = hs + this->kernel_h;
-                        de = ds + this->kernel_d;
-                        static_cast<void>(padtail_w);
-                        static_cast<void>(padtail_h);
-                        static_cast<void>(padtail_d);
-                        ksize = this->kernel_w * this->kernel_h * this->kernel_d;
-                    }
-                    const std::int32_t ws2 = std::max(ws, 0);
-                    const std::int32_t hs2 = std::max(hs, 0);
-                    const std::int32_t ds2 = std::max(ds, 0);
-                    const std::int32_t we2 = std::min(we, w);
-                    const std::int32_t he2 = std::min(he, h);
-                    const std::int32_t de2 = std::min(de, d);
-                    float acc = this->pooling_type == 0 ? -FLT_MAX : 0.0F;
-                    for (std::int32_t z = ds2; z < de2; ++z) {
-                        for (std::int32_t y = hs2; y < he2; ++y) {
-                            for (std::int32_t x = ws2; x < we2; ++x) {
-                                const float v = image.depth(z).row(y)[x];
-                                acc = this->pooling_type == 0 ? std::max(acc, v) : acc + v;
+                    const std::int32_t x0 = ox * this->stride_w;
+                    float acc = this->pooling_type == 0 ? -std::numeric_limits<float>::max() : 0.0F;
+                    std::int32_t area = 0;
+                    for (std::int32_t kz = 0; kz < this->kernel_d; ++kz) {
+                        const std::int32_t spz = z0 + kz;
+                        const std::int32_t sz = spz - front_eff;
+                        const bool z_ok = sz >= 0 && sz < d;
+                        for (std::int32_t ky = 0; ky < this->kernel_h; ++ky) {
+                            const std::int32_t spy = y0 + ky;
+                            const std::int32_t sy = spy - top_eff;
+                            const bool y_ok = sy >= 0 && sy < h;
+                            for (std::int32_t kx = 0; kx < this->kernel_w; ++kx) {
+                                const std::int32_t spx = x0 + kx;
+                                const std::int32_t sx = spx - left_eff;
+                                const bool in_range = z_ok && y_ok && sx >= 0 && sx < w;
+                                const float v = in_range ? image.depth(sz).row(sy)[sx] : pad_value;
+                                if (this->pooling_type == 0) {
+                                    acc = std::max(acc, v);
+                                } else if (this->avgpool_count_include_pad != 0) {
+                                    acc += v;
+                                } else if (spz >= count_z0 && spz < count_z1 && spy >= count_y0 &&
+                                           spy < count_y1 && spx >= count_x0 && spx < count_x1) {
+                                    acc += v;
+                                    ++area;
+                                }
                             }
                         }
                     }
                     if (this->pooling_type == 1) {
-                        std::int32_t count = (we2 - ws2) * (he2 - hs2) * (de2 - ds2);
-                        if (this->avgpool_count_include_pad != 0) {
-                            count = ksize;
-                        }
-                        acc = count > 0 ? acc / static_cast<float>(count) : 0.0F;
-                    } else if (we2 <= ws2 || he2 <= hs2 || de2 <= ds2) {
-                        acc = 0.0F;
+                        acc = this->avgpool_count_include_pad != 0
+                                  ? acc / static_cast<float>(maxk)
+                                  : acc / static_cast<float>(area);
                     }
                     out.depth(oz).row(oy)[ox] = acc;
                 }

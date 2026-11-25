@@ -71,14 +71,20 @@ std::int32_t Quantize<LayerT, MatT, OptionT, ParamDictT, ModelBinT>::forward(con
         return -100;
     }
 
-    const float* src = bottom_blob;
-    auto* dst = static_cast<std::int8_t*>(top_blob.data);
-    for (std::int32_t i = 0; i < count; ++i) {
-        const std::int32_t channel = dims >= 3 ? i / (w * h * d) : 0;
-        const float scale = this->scale_data_size == 1 ? this->scale_data[0] : this->scale_data[channel];
-        const auto v = static_cast<std::int32_t>(std::round(src[i] * scale));
-        dst[i] = static_cast<std::int8_t>(v > 127 ? 127 : (v < -127 ? -127 : v));
+    const std::int32_t plane = w * h * d;
+    const std::int32_t groups = dims >= 3 ? channels : 1;
+    for (std::int32_t q = 0; q < groups; ++q) {
+        const float* src = dims >= 2 ? static_cast<const float*>(bottom_blob.channel(q))
+                                     : static_cast<const float*>(bottom_blob.data);
+        auto* dst = dims >= 2 ? static_cast<std::int8_t*>(top_blob.channel(q))
+                              : static_cast<std::int8_t*>(top_blob.data);
+        const float scale = this->scale_data_size == 1 ? this->scale_data[0] : this->scale_data[q];
+        for (std::int32_t i = 0; i < plane; ++i) {
+            const auto v = static_cast<std::int32_t>(std::round(src[i] * scale));
+            dst[i] = static_cast<std::int8_t>(v > 127 ? 127 : (v < -127 ? -127 : v));
+        }
     }
+    static_cast<void>(count);
     return 0;
 }
 
@@ -153,16 +159,21 @@ std::int32_t Dequantize<LayerT, MatT, OptionT, ParamDictT, ModelBinT>::forward(c
         return -100;
     }
 
-    const auto* src = static_cast<const std::int32_t*>(bottom_blob.data);
-    float* dst = top_blob;
-    for (std::int32_t i = 0; i < count; ++i) {
-        const std::int32_t channel = dims >= 3 ? i / (w * h * d) : 0;
-        const float scale = this->scale_data_size == 1 ? this->scale_data[0] : this->scale_data[channel];
+    const std::int32_t plane = w * h * d;
+    const std::int32_t groups = dims >= 3 ? channels : 1;
+    for (std::int32_t q = 0; q < groups; ++q) {
+        const auto* src = dims >= 2 ? static_cast<const std::int32_t*>(bottom_blob.channel(q))
+                                    : static_cast<const std::int32_t*>(bottom_blob.data);
+        float* dst = dims >= 2 ? static_cast<float*>(top_blob.channel(q)) : static_cast<float*>(top_blob.data);
+        const float scale = this->scale_data_size == 1 ? this->scale_data[0] : this->scale_data[q];
         const float bias = this->bias_data_size == 0
                                ? 0.0F
-                               : (this->bias_data_size == 1 ? this->bias_data[0] : this->bias_data[channel]);
-        dst[i] = static_cast<float>(src[i]) * scale + bias;
+                               : (this->bias_data_size == 1 ? this->bias_data[0] : this->bias_data[q]);
+        for (std::int32_t i = 0; i < plane; ++i) {
+            dst[i] = static_cast<float>(src[i]) * scale + bias;
+        }
     }
+    static_cast<void>(count);
     return 0;
 }
 
@@ -255,22 +266,28 @@ std::int32_t Requantize<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Activation
         return -100;
     }
 
-    const auto* src = static_cast<const std::int32_t*>(bottom_blob.data);
-    auto* dst = static_cast<std::int8_t*>(top_blob.data);
-    for (std::int32_t i = 0; i < count; ++i) {
-        const std::int32_t channel = dims >= 3 ? i / (w * h * d) : 0;
-        const float s_in = this->scale_in_data_size == 1 ? this->scale_in_data[0] : this->scale_in_data[channel];
-        const float s_out = this->scale_out_data_size == 1 ? this->scale_out_data[0] : this->scale_out_data[channel];
+    const std::int32_t plane = w * h * d;
+    const std::int32_t groups = dims >= 3 ? channels : 1;
+    for (std::int32_t q = 0; q < groups; ++q) {
+        const auto* src = dims >= 2 ? static_cast<const std::int32_t*>(bottom_blob.channel(q))
+                                    : static_cast<const std::int32_t*>(bottom_blob.data);
+        auto* dst = dims >= 2 ? static_cast<std::int8_t*>(top_blob.channel(q))
+                              : static_cast<std::int8_t*>(top_blob.data);
+        const float s_in = this->scale_in_data_size == 1 ? this->scale_in_data[0] : this->scale_in_data[q];
+        const float s_out = this->scale_out_data_size == 1 ? this->scale_out_data[0] : this->scale_out_data[q];
         const float bias = this->bias_data_size == 0
                                ? 0.0F
-                               : (this->bias_data_size == 1 ? this->bias_data[0] : this->bias_data[channel]);
-        float v = static_cast<float>(src[i]) * s_in + bias;
-        if (this->activation_type != 0) {
-            v = Activation(v, this->activation_type, this->activation_params);
+                               : (this->bias_data_size == 1 ? this->bias_data[0] : this->bias_data[q]);
+        for (std::int32_t i = 0; i < plane; ++i) {
+            float v = static_cast<float>(src[i]) * s_in + bias;
+            if (this->activation_type != 0) {
+                v = Activation(v, this->activation_type, this->activation_params);
+            }
+            const auto qi = static_cast<std::int32_t>(std::round(v * s_out));
+            dst[i] = static_cast<std::int8_t>(qi > 127 ? 127 : (qi < -127 ? -127 : qi));
         }
-        const auto q = static_cast<std::int32_t>(std::round(v * s_out));
-        dst[i] = static_cast<std::int8_t>(q > 127 ? 127 : (q < -127 ? -127 : q));
     }
+    static_cast<void>(count);
     return 0;
 }
 
