@@ -12,6 +12,9 @@
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #include <cstdint>
 #include <vector>
 
@@ -565,6 +568,30 @@ private:
                     sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
                     sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 4));
                     sums_int32[ii] = _mm_cvtsi128_si32(sum128);
+                }
+#elif defined(__ARM_NEON)
+                // Baseline arm64 NEON: widen int8 pairs to int16 and
+                // pairwise-accumulate to int32 (no dotprod required).
+                int32x4_t accv_neon[kMTile];
+                for (std::int32_t ii = 0; ii < mi; ++ii) {
+                    accv_neon[ii] = vdupq_n_s32(0);
+                }
+                for (; kk + 16 <= max_kk; kk += 16) {
+                    const int8x16_t b8 = vld1q_s8(ptrB + k0 + kk);
+                    for (std::int32_t ii = 0; ii < mi; ++ii) {
+                        const int8x16_t a8 = vld1q_s8(arows[ii] + k0 + kk);
+#if defined(__ARM_FEATURE_DOTPROD)
+                        accv_neon[ii] = vdotq_s32(accv_neon[ii], a8, b8);
+#else
+                        const int16x8_t lo = vmull_s8(vget_low_s8(a8), vget_low_s8(b8));
+                        const int16x8_t hi = vmull_s8(vget_high_s8(a8), vget_high_s8(b8));
+                        accv_neon[ii] = vpadalq_s16(accv_neon[ii], lo);
+                        accv_neon[ii] = vpadalq_s16(accv_neon[ii], hi);
+#endif
+                    }
+                }
+                for (std::int32_t ii = 0; ii < mi; ++ii) {
+                    sums_int32[ii] = vaddvq_s32(accv_neon[ii]);
                 }
 #endif
                 for (; kk < max_kk; ++kk) {
