@@ -42,8 +42,10 @@ public:
         const std::int32_t count = indices.w * indices.h;
 
         MatT& top_blob = top_blobs[0];
+        const bool one_d = data.dims == 1 || (data.dims == 3 && data.h == 1 && data.c == 1);
+        const bool two_d = data.dims == 2 || (data.dims == 3 && data.c == 1);
         if (this->axis == 0) {
-            if (data.dims == 1) {
+            if (one_d) {
                 top_blob.create(count, 4u, opt.blob_allocator);
                 if (top_blob.empty()) {
                     return -100;
@@ -57,7 +59,7 @@ public:
                 }
                 return 0;
             }
-            if (data.dims == 2) {
+            if (two_d) {
                 top_blob.create(data.w, count, 4u, opt.blob_allocator);
                 if (top_blob.empty()) {
                     return -100;
@@ -74,7 +76,7 @@ public:
             return -100;
         }
 
-        if (this->axis == 1 && data.dims == 2) {
+        if (this->axis == 1 && two_d) {
             top_blob.create(count, data.h, 4u, opt.blob_allocator);
             if (top_blob.empty()) {
                 return -100;
