@@ -365,8 +365,6 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
 MLAYER_CONVOLUTION_TEMPLATE
 std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::convolution_im2col(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
 {
-    constexpr std::int32_t kTile = 128;
-
     const std::int32_t outw = top_blob.w;
     const std::int32_t outh = top_blob.h;
     const std::int32_t inch = bottom_blob.c;
@@ -375,75 +373,70 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
     const std::int32_t K = inch * maxk;
     const std::int32_t M = outw * outh;
 
-    MatT col(K, kTile, 4u, opt.workspace_allocator);
+    MatT col(K, M, 4u, opt.workspace_allocator);
     if (col.empty())
     {
         return -100;
     }
 
-    for (std::int32_t m0 = 0; m0 < M; m0 += kTile)
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (std::int32_t m = 0; m < M; m++)
     {
-        const std::int32_t mt = M - m0 < kTile ? M - m0 : kTile;
+        const std::int32_t oy = m / outw;
+        const std::int32_t ox = m % outw;
+        float* cp = col.row(m);
 
-        for (std::int32_t t = 0; t < mt; t++)
+        for (std::int32_t q = 0; q < inch; q++)
         {
-            const std::int32_t m = m0 + t;
-            const std::int32_t oy = m / outw;
-            const std::int32_t ox = m % outw;
-            float* cp = col.row(t);
-
-            for (std::int32_t q = 0; q < inch; q++)
+            const MatT src = bottom_blob.channel(q);
+            for (std::int32_t ky = 0; ky < kernel_h; ky++)
             {
-                const MatT src = bottom_blob.channel(q);
-                for (std::int32_t ky = 0; ky < kernel_h; ky++)
+                const float* sptr = src.row(oy * stride_h + ky * dilation_h) + ox * stride_w;
+                float* dst = cp + q * maxk + ky * kernel_w;
+                for (std::int32_t kx = 0; kx < kernel_w; kx++)
                 {
-                    const float* sptr = src.row(oy * stride_h + ky * dilation_h) + ox * stride_w;
-                    float* dst = cp + q * maxk + ky * kernel_w;
-                    for (std::int32_t kx = 0; kx < kernel_w; kx++)
-                    {
-                        dst[kx] = sptr[kx * dilation_w];
-                    }
+                    dst[kx] = sptr[kx * dilation_w];
                 }
             }
         }
+    }
 
-        #pragma omp parallel for num_threads(opt.num_threads)
-        for (std::int32_t p = 0; p < outch; p++)
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (std::int32_t p = 0; p < outch; p++)
+    {
+        const float* wp = static_cast<const float*>(weight_data) + p * K;
+        const float bias = bias_data.empty() ? 0.f : bias_data[p];
+        float* outptr = top_blob.channel(p);
+
+        for (std::int32_t m = 0; m < M; m++)
         {
-            const float* wp = static_cast<const float*>(weight_data) + p * K;
-            const float bias = bias_data.empty() ? 0.f : bias_data[p];
-            float* outptr = top_blob.channel(p) + m0;
-
-            for (std::int32_t t = 0; t < mt; t++)
-            {
-                const float* cp = col.row(t);
-                float sum = bias;
+            const float* cp = col.row(m);
+            float sum = bias;
 
 #if defined(__AVX2__)
-                __m256 acc = _mm256_setzero_ps();
-                std::int32_t k = 0;
-                for (; k + 8 <= K; k += 8)
-                {
-                    acc = _mm256_fmadd_ps(_mm256_loadu_ps(cp + k), _mm256_loadu_ps(wp + k), acc);
-                }
-                __m128 lo = _mm256_castps256_ps128(acc);
-                __m128 hi = _mm256_extractf128_ps(acc, 1);
-                __m128 s128 = _mm_add_ps(lo, hi);
-                s128 = _mm_hadd_ps(s128, s128);
-                s128 = _mm_hadd_ps(s128, s128);
-                sum += _mm_cvtss_f32(s128);
-                for (; k < K; k++)
-                {
-                    sum += cp[k] * wp[k];
-                }
-#else
-                for (std::int32_t k = 0; k < K; k++)
-                {
-                    sum += cp[k] * wp[k];
-                }
-#endif
-                outptr[t] = Activation(sum, activation_type, activation_params);
+            __m256 acc = _mm256_setzero_ps();
+            std::int32_t k = 0;
+            for (; k + 8 <= K; k += 8)
+            {
+                acc = _mm256_fmadd_ps(_mm256_loadu_ps(cp + k), _mm256_loadu_ps(wp + k), acc);
             }
+            __m128 lo = _mm256_castps256_ps128(acc);
+            __m128 hi = _mm256_extractf128_ps(acc, 1);
+            __m128 s128 = _mm_add_ps(lo, hi);
+            s128 = _mm_hadd_ps(s128, s128);
+            s128 = _mm_hadd_ps(s128, s128);
+            sum += _mm_cvtss_f32(s128);
+            for (; k < K; k++)
+            {
+                sum += cp[k] * wp[k];
+            }
+#else
+            for (std::int32_t k = 0; k < K; k++)
+            {
+                sum += cp[k] * wp[k];
+            }
+#endif
+            outptr[m] = Activation(sum, activation_type, activation_params);
         }
     }
 
@@ -479,6 +472,18 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
     top_blob.create(outw, outh, num_output, elemsize, opt.blob_allocator);
     if (top_blob.empty())
         return -100;
+
+    if (kernel_w == 1 && kernel_h == 1 && stride_w == 1 && stride_h == 1 && dilation_w == 1 && dilation_h == 1)
+    {
+        return convolution_1x1(bottom_blob_bordered, top_blob, weight_data, bias_data, activation_type, activation_params, opt);
+    }
+
+    const std::size_t im2col_bytes = static_cast<std::size_t>(kernel_w) * kernel_h * bottom_blob_bordered.c *
+                                     top_blob.w * top_blob.h * sizeof(float);
+    if (kernel_w * kernel_h * bottom_blob_bordered.c >= 64 && im2col_bytes <= 512ull * 1024ull * 1024ull)
+    {
+        return convolution_im2col(bottom_blob_bordered, top_blob, weight_data, bias_data, kernel_w, kernel_h, stride_w, stride_h, dilation_w, dilation_h, activation_type, activation_params, opt);
+    }
 
     std::int32_t ret = convolution(bottom_blob_bordered, top_blob, weight_data, bias_data, kernel_w, kernel_h, stride_w, stride_h, dilation_w, dilation_h, activation_type, activation_params, opt);
     if (ret != 0)
