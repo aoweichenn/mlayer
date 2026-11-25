@@ -36,24 +36,40 @@ public:
         const MatT& indices = bottom_blobs[1];
         const MatT& updates = bottom_blobs[2];
 
-        if (data.dims != 1) {
+        // Accepted shapes:
+        //   data (N)        + indices (n)      -> flat positions
+        //   data (W, H)     + indices (2, n)   -> (row, col) pairs, row-major
+        const bool flat = data.dims == 1 || (data.dims == 3 && data.h == 1 && data.c == 1);
+        const bool ranked = (data.dims == 2 || (data.dims == 3 && data.c == 1)) && indices.w == 2;
+        if (!flat && !ranked) {
             return -100;
         }
-        const std::int32_t count = indices.w * indices.h;
+        const std::int32_t count = ranked ? indices.h * indices.c : indices.w * indices.h;
         if (updates.w != count || updates.h * updates.c != 1) {
             return -100;
         }
 
         MatT& top_blob = top_blobs[0];
-        top_blob.create(data.w, 4u, opt.blob_allocator);
+        const std::int32_t total = flat ? data.w : data.w * data.h;
+        top_blob.create(data.w, data.h, 4u, opt.blob_allocator);
         if (top_blob.empty()) {
             return -100;
         }
-        std::memcpy(top_blob.data, data.data, static_cast<std::size_t>(data.w) * sizeof(float));
+        std::memcpy(top_blob.data, data.data, static_cast<std::size_t>(total) * sizeof(float));
 
         for (std::int32_t j = 0; j < count; ++j) {
-            const auto index = static_cast<std::int32_t>(std::lround(indices[j]));
-            if (index < 0 || index >= data.w) {
+            std::int32_t index = 0;
+            if (flat) {
+                index = static_cast<std::int32_t>(std::lround(indices[j]));
+            } else {
+                const std::int32_t row = static_cast<std::int32_t>(std::lround(indices.row(j)[0]));
+                const std::int32_t col = static_cast<std::int32_t>(std::lround(indices.row(j)[1]));
+                if (row < 0 || row >= data.h) {
+                    return -100;
+                }
+                index = row * data.w + col;
+            }
+            if (index < 0 || index >= total) {
                 return -100;
             }
             top_blob[index] = updates[j];
