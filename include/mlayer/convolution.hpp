@@ -59,11 +59,10 @@ protected:
     }
 #endif
 
-    static std::int32_t convolution_3x3s1_winograd43(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
 
-    static std::int32_t convolution_3x3s1_winograd(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
 
     static std::int32_t convolution_im2col(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
+    static std::int32_t convolution_gemm_pack(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
 
 public:
     std::int32_t num_output;
@@ -449,595 +448,6 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
 
 
 MLAYER_CONVOLUTION_TEMPLATE
-std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::convolution_3x3s1_winograd43(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
-{
-    // F(4x4, 3x3) winograd for stride-1 fp32 convolution.
-    const std::int32_t outw = top_blob.w;
-    const std::int32_t outh = top_blob.h;
-    const std::int32_t inch = bottom_blob.c;
-    const std::int32_t outch = top_blob.c;
-    const std::int32_t K = inch * 9;
-    const float* weight_ptr = static_cast<const float*>(weight_data);
-
-    static constexpr float kBT[6][6] = {
-        {4.f, 0.f, -5.f, 0.f, 1.f, 0.f},
-        {0.f, -4.f, -4.f, 1.f, 1.f, 0.f},
-        {0.f, 4.f, -4.f, -1.f, 1.f, 0.f},
-        {0.f, -2.f, -1.f, 2.f, 1.f, 0.f},
-        {0.f, 2.f, -1.f, -2.f, 1.f, 0.f},
-        {0.f, 4.f, 0.f, -5.f, 0.f, 1.f},
-    };
-    static constexpr float kG[6][3] = {
-        {1.f / 4.f, 0.f, 0.f},
-        {-1.f / 6.f, -1.f / 6.f, -1.f / 6.f},
-        {-1.f / 6.f, 1.f / 6.f, -1.f / 6.f},
-        {1.f / 24.f, 1.f / 12.f, 1.f / 6.f},
-        {1.f / 24.f, -1.f / 12.f, 1.f / 6.f},
-        {0.f, 0.f, 1.f},
-    };
-    static constexpr float kAT[4][6] = {
-        {1.f, 1.f, 1.f, 1.f, 1.f, 0.f},
-        {0.f, 1.f, -1.f, 2.f, -2.f, 0.f},
-        {0.f, 1.f, 1.f, 4.f, 4.f, 0.f},
-        {0.f, 1.f, -1.f, 8.f, -8.f, 1.f},
-    };
-
-    const std::int32_t tiles_x = (outw + 3) / 4;
-    const std::int32_t tiles_y = (outh + 3) / 4;
-    const std::int32_t num_tiles = tiles_x * tiles_y;
-    const std::int32_t pad_w = tiles_x * 4 + 2;
-    const std::int32_t pad_h = tiles_y * 4 + 2;
-    constexpr std::int32_t kChannelBlock = 8;
-    constexpr std::int32_t kTilePositions = 36;
-
-    MatT input_pad(pad_w, pad_h, inch, 4u, opt.workspace_allocator);
-    if (input_pad.empty())
-    {
-        return -100;
-    }
-    const std::int32_t copy_w = std::min(pad_w, bottom_blob.w);
-    const std::int32_t copy_h = std::min(pad_h, bottom_blob.h);
-    #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t q = 0; q < inch; q++)
-    {
-        for (std::int32_t y = 0; y < pad_h; y++)
-        {
-            float* dst = input_pad.channel(q).row(y);
-            for (std::int32_t x = 0; x < pad_w; x++)
-            {
-                dst[x] = (y < copy_h && x < copy_w) ? bottom_blob.channel(q).row(y)[x] : 0.f;
-            }
-        }
-    }
-
-    const std::int32_t pblocks = (outch + kChannelBlock - 1) / kChannelBlock;
-    MatT U(static_cast<std::int32_t>(static_cast<std::size_t>(pblocks) * kTilePositions * inch * kChannelBlock),
-           4u, opt.workspace_allocator);
-    if (U.empty())
-    {
-        return -100;
-    }
-    float* up = U;
-
-    #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t p = 0; p < outch; p++)
-    {
-        float* uph = up + static_cast<std::size_t>(p / kChannelBlock) * kTilePositions * inch * kChannelBlock +
-                     (p % kChannelBlock);
-        for (std::int32_t q = 0; q < inch; q++)
-        {
-            const float* g = weight_ptr + p * K + q * 9;
-            const float gv[3][3] = {{g[0], g[1], g[2]}, {g[3], g[4], g[5]}, {g[6], g[7], g[8]}};
-
-            float t[6][3];
-            for (std::int32_t j = 0; j < 3; j++)
-            {
-                const float a = gv[0][j], b = gv[1][j], c = gv[2][j];
-                t[0][j] = 0.25f * a;
-                t[1][j] = -(a + b + c) / 6.f;
-                t[2][j] = (-a + b - c) / 6.f;
-                t[3][j] = a / 24.f + b / 12.f + c / 6.f;
-                t[4][j] = a / 24.f - b / 12.f + c / 6.f;
-                t[5][j] = c;
-            }
-            for (std::int32_t i = 0; i < 6; i++)
-            {
-                const float t0 = t[i][0], t1 = t[i][1], t2 = t[i][2];
-                const float u0 = 0.25f * t0;
-                const float u1 = -(t0 + t1 + t2) / 6.f;
-                const float u2 = (-t0 + t1 - t2) / 6.f;
-                const float u3 = t0 / 24.f + t1 / 12.f + t2 / 6.f;
-                const float u4 = t0 / 24.f - t1 / 12.f + t2 / 6.f;
-                const float u5 = t2;
-                float* row = uph + (static_cast<std::size_t>(i * 6) * inch + q) * kChannelBlock;
-                row[0 * inch * kChannelBlock] = u0;
-                row[1 * inch * kChannelBlock] = u1;
-                row[2 * inch * kChannelBlock] = u2;
-                row[3 * inch * kChannelBlock] = u3;
-                row[4 * inch * kChannelBlock] = u4;
-                row[5 * inch * kChannelBlock] = u5;
-            }
-        }
-    }
-
-    const std::int32_t chunk_tiles = std::max(1, 256 / inch);
-    const std::int32_t num_chunks = (num_tiles + chunk_tiles - 1) / chunk_tiles;
-
-    #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t chunk = 0; chunk < num_chunks; chunk++)
-    {
-        const std::int32_t tile_begin = chunk * chunk_tiles;
-        const std::int32_t tile_end = std::min(num_tiles, tile_begin + chunk_tiles);
-        const std::int32_t chunk_count = tile_end - tile_begin;
-
-        std::vector<float> vbuf(static_cast<std::size_t>(chunk_count) * kTilePositions * inch);
-
-        for (std::int32_t lt = 0; lt < chunk_count; lt++)
-        {
-            const std::int32_t tile = tile_begin + lt;
-            const std::int32_t ty = tile / tiles_x;
-            const std::int32_t tx = tile % tiles_x;
-            float* vtile = vbuf.data() + static_cast<std::size_t>(lt) * kTilePositions * inch;
-
-            for (std::int32_t q = 0; q < inch; q++)
-            {
-                const MatT src = input_pad.channel(q);
-                const float* d0 = src.row(ty * 4 + 0) + tx * 4;
-                const float* d1 = src.row(ty * 4 + 1) + tx * 4;
-                const float* d2 = src.row(ty * 4 + 2) + tx * 4;
-                const float* d3 = src.row(ty * 4 + 3) + tx * 4;
-                const float* d4 = src.row(ty * 4 + 4) + tx * 4;
-                const float* d5 = src.row(ty * 4 + 5) + tx * 4;
-                const float* d[6] = {d0, d1, d2, d3, d4, d5};
-
-                float r[6][6];
-                for (std::int32_t j = 0; j < 6; j++)
-                {
-                    const float d0 = d[0][j], d1 = d[1][j], d2 = d[2][j];
-                    const float d3 = d[3][j], d4 = d[4][j], d5 = d[5][j];
-                    r[0][j] = 4.f * d0 - 5.f * d2 + d4;
-                    r[1][j] = -4.f * d1 - 4.f * d2 + d3 + d4;
-                    r[2][j] = 4.f * d1 - 4.f * d2 - d3 + d4;
-                    r[3][j] = -2.f * d1 - d2 + 2.f * d3 + d4;
-                    r[4][j] = 2.f * d1 - d2 - 2.f * d3 + d4;
-                    r[5][j] = 4.f * d1 - 5.f * d3 + d5;
-                }
-                for (std::int32_t i = 0; i < 6; i++)
-                {
-                    const float r0 = r[i][0], r1 = r[i][1], r2 = r[i][2];
-                    const float r3 = r[i][3], r4 = r[i][4], r5 = r[i][5];
-                    vtile[(static_cast<std::size_t>((i * 6 + 0) * inch)) + q] = 4.f * r0 - 5.f * r2 + r4;
-                    vtile[(static_cast<std::size_t>((i * 6 + 1) * inch)) + q] =
-                        -4.f * r1 - 4.f * r2 + r3 + r4;
-                    vtile[(static_cast<std::size_t>((i * 6 + 2) * inch)) + q] =
-                        4.f * r1 - 4.f * r2 - r3 + r4;
-                    vtile[(static_cast<std::size_t>((i * 6 + 3) * inch)) + q] =
-                        -2.f * r1 - r2 + 2.f * r3 + r4;
-                    vtile[(static_cast<std::size_t>((i * 6 + 4) * inch)) + q] =
-                        2.f * r1 - r2 - 2.f * r3 + r4;
-                    vtile[(static_cast<std::size_t>((i * 6 + 5) * inch)) + q] = 4.f * r1 - 5.f * r3 + r5;
-                }
-            }
-        }
-
-        float mbuf[kTilePositions * kChannelBlock];
-        for (std::int32_t pb = 0; pb < pblocks; pb++)
-        {
-            const std::int32_t p0 = pb * kChannelBlock;
-            const std::int32_t np = outch - p0 < kChannelBlock ? outch - p0 : kChannelBlock;
-            const float* upb = up + static_cast<std::size_t>(pb) * kTilePositions * inch * kChannelBlock;
-
-            for (std::int32_t lt = 0; lt < chunk_count; lt++)
-            {
-                const float* vtile = vbuf.data() + static_cast<std::size_t>(lt) * kTilePositions * inch;
-
-                for (std::int32_t pos = 0; pos < kTilePositions; pos++)
-                {
-                    const float* vrow = vtile + static_cast<std::size_t>(pos) * inch;
-                    const float* urow = upb + static_cast<std::size_t>(pos) * inch * kChannelBlock;
-                    float* mrow = mbuf + static_cast<std::size_t>(pos) * kChannelBlock;
-#if defined(__AVX2__)
-                    if (np == kChannelBlock)
-                    {
-                        for (std::int32_t g = 0; g < kChannelBlock; g += 8)
-                        {
-                            __m256 acc = _mm256_setzero_ps();
-                            for (std::int32_t q = 0; q < inch; q++)
-                            {
-                                const __m256 v = _mm256_set1_ps(vrow[q]);
-                                acc = _mm256_fmadd_ps(v, _mm256_loadu_ps(urow + q * kChannelBlock + g), acc);
-                            }
-                            _mm256_storeu_ps(mrow + g, acc);
-                        }
-                        continue;
-                    }
-#endif
-                    for (std::int32_t p = 0; p < np; p++)
-                    {
-                        float sum = 0.f;
-                        for (std::int32_t q = 0; q < inch; q++)
-                        {
-                            sum += vrow[q] * urow[q * kChannelBlock + p];
-                        }
-                        mrow[p] = sum;
-                    }
-                }
-
-                const std::int32_t tile = tile_begin + lt;
-                const std::int32_t ty = tile / tiles_x;
-                const std::int32_t tx = tile % tiles_x;
-
-                float yv[4][4][kChannelBlock];
-#if defined(__AVX2__)
-                if (np == kChannelBlock)
-                {
-                    for (std::int32_t g = 0; g < kChannelBlock; g += 8)
-                    {
-                        __m256 tmp[4][6];
-                        for (std::int32_t r = 0; r < 4; r++)
-                        {
-                            for (std::int32_t j = 0; j < 6; j++)
-                            {
-                                __m256 acc = _mm256_set1_ps(0.f);
-                                for (std::int32_t i = 0; i < 6; i++)
-                                {
-                                    acc = _mm256_fmadd_ps(_mm256_set1_ps(kAT[r][i]),
-                                                          _mm256_loadu_ps(mbuf + (i * 6 + j) * kChannelBlock + g),
-                                                          acc);
-                                }
-                                tmp[r][j] = acc;
-                            }
-                        }
-                        for (std::int32_t r = 0; r < 4; r++)
-                        {
-                            for (std::int32_t c = 0; c < 4; c++)
-                            {
-                                __m256 acc = _mm256_set1_ps(0.f);
-                                for (std::int32_t j = 0; j < 6; j++)
-                                {
-                                    acc = _mm256_fmadd_ps(_mm256_set1_ps(kAT[c][j]), tmp[r][j], acc);
-                                }
-                                _mm256_storeu_ps(yv[r][c] + g, acc);
-                            }
-                        }
-                    }
-                }
-                else
-#endif
-                {
-                    for (std::int32_t p = 0; p < np; p++)
-                    {
-                        float tmp[4][6];
-                        for (std::int32_t r = 0; r < 4; r++)
-                        {
-                            for (std::int32_t j = 0; j < 6; j++)
-                            {
-                                float acc = 0.f;
-                                for (std::int32_t i = 0; i < 6; i++)
-                                {
-                                    acc += kAT[r][i] * mbuf[(i * 6 + j) * kChannelBlock + p];
-                                }
-                                tmp[r][j] = acc;
-                            }
-                        }
-                        for (std::int32_t r = 0; r < 4; r++)
-                        {
-                            for (std::int32_t c = 0; c < 4; c++)
-                            {
-                                float acc = 0.f;
-                                for (std::int32_t j = 0; j < 6; j++)
-                                {
-                                    acc += kAT[c][j] * tmp[r][j];
-                                }
-                                yv[r][c][p] = acc;
-                            }
-                        }
-                    }
-                }
-
-                for (std::int32_t r = 0; r < 4; r++)
-                {
-                    const std::int32_t oy = ty * 4 + r;
-                    if (oy >= outh)
-                    {
-                        continue;
-                    }
-                    for (std::int32_t c = 0; c < 4; c++)
-                    {
-                        const std::int32_t ox = tx * 4 + c;
-                        if (ox >= outw)
-                        {
-                            continue;
-                        }
-                        for (std::int32_t t = 0; t < np; t++)
-                        {
-                            const std::int32_t p = p0 + t;
-                            const float bias = bias_data.empty() ? 0.f : bias_data[p];
-                            top_blob.channel(p)[oy * outw + ox] =
-                                fused_activation(yv[r][c][t] + bias, activation_type, activation_params);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return 0;
-}
-
-MLAYER_CONVOLUTION_TEMPLATE
-std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::convolution_3x3s1_winograd(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
-{
-    // F(2x2, 3x3) winograd for stride-1 fp32 convolution.
-    const std::int32_t outw = top_blob.w;
-    const std::int32_t outh = top_blob.h;
-    const std::int32_t inch = bottom_blob.c;
-    const std::int32_t outch = top_blob.c;
-    const std::int32_t K = inch * 9;
-    const float* weight_ptr = static_cast<const float*>(weight_data);
-
-    const std::int32_t tiles_x = (outw + 1) / 2;
-    const std::int32_t tiles_y = (outh + 1) / 2;
-    const std::int32_t num_tiles = tiles_x * tiles_y;
-    const std::int32_t pad_w = tiles_x * 2 + 2;
-    const std::int32_t pad_h = tiles_y * 2 + 2;
-    constexpr std::int32_t kChannelBlock = 8;
-
-    MatT input_pad(pad_w, pad_h, inch, 4u, opt.workspace_allocator);
-    if (input_pad.empty())
-    {
-        return -100;
-    }
-    const std::int32_t copy_w = std::min(pad_w, bottom_blob.w);
-    const std::int32_t copy_h = std::min(pad_h, bottom_blob.h);
-    #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t q = 0; q < inch; q++)
-    {
-        for (std::int32_t y = 0; y < pad_h; y++)
-        {
-            float* dst = input_pad.channel(q).row(y);
-            if (y < copy_h)
-            {
-                const float* src = bottom_blob.channel(q).row(y);
-                for (std::int32_t x = 0; x < copy_w; x++)
-                {
-                    dst[x] = src[x];
-                }
-                for (std::int32_t x = copy_w; x < pad_w; x++)
-                {
-                    dst[x] = 0.f;
-                }
-            }
-            else
-            {
-                for (std::int32_t x = 0; x < pad_w; x++)
-                {
-                    dst[x] = 0.f;
-                }
-            }
-        }
-    }
-
-    // Transformed weights, blocked as [pblock][pos][q][lane] so one output
-    // channel block streams contiguously while the tile loop runs.
-    const std::int32_t pblocks = (outch + kChannelBlock - 1) / kChannelBlock;
-    MatT U(static_cast<std::int32_t>(static_cast<std::size_t>(pblocks) * 16u * static_cast<std::size_t>(inch) *
-                                     static_cast<std::size_t>(kChannelBlock)),
-           4u, opt.workspace_allocator);
-    if (U.empty())
-    {
-        return -100;
-    }
-    float* up = U;
-    #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t p = 0; p < outch; p++)
-    {
-        float* uph = up + static_cast<std::size_t>(p / kChannelBlock) * 16 * inch * kChannelBlock +
-                     (p % kChannelBlock);
-        for (std::int32_t q = 0; q < inch; q++)
-        {
-            const float* g = weight_ptr + p * K + q * 9;
-            const float g00 = g[0], g01 = g[1], g02 = g[2];
-            const float g10 = g[3], g11 = g[4], g12 = g[5];
-            const float g20 = g[6], g21 = g[7], g22 = g[8];
-
-            float t[4][3];
-            t[0][0] = g00; t[0][1] = g01; t[0][2] = g02;
-            t[1][0] = (g00 + g10 + g20) * 0.5f;
-            t[1][1] = (g01 + g11 + g21) * 0.5f;
-            t[1][2] = (g02 + g12 + g22) * 0.5f;
-            t[2][0] = (g00 - g10 + g20) * 0.5f;
-            t[2][1] = (g01 - g11 + g21) * 0.5f;
-            t[2][2] = (g02 - g12 + g22) * 0.5f;
-            t[3][0] = g20; t[3][1] = g21; t[3][2] = g22;
-
-            for (std::int32_t i = 0; i < 4; i++)
-            {
-                const float u0 = t[i][0];
-                const float u1 = (t[i][0] + t[i][1] + t[i][2]) * 0.5f;
-                const float u2 = (t[i][0] - t[i][1] + t[i][2]) * 0.5f;
-                const float u3 = t[i][2];
-                uph[((i * 4 + 0) * inch + q) * kChannelBlock] = u0;
-                uph[((i * 4 + 1) * inch + q) * kChannelBlock] = u1;
-                uph[((i * 4 + 2) * inch + q) * kChannelBlock] = u2;
-                uph[((i * 4 + 3) * inch + q) * kChannelBlock] = u3;
-            }
-        }
-    }
-
-    // Tile-blocked: each V tile is computed once and reused for every output
-    // channel block while it is still resident in L1.
-    const std::int32_t chunk_tiles = std::max(1, 1024 / inch);
-    const std::int32_t num_chunks = (num_tiles + chunk_tiles - 1) / chunk_tiles;
-
-    #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t chunk = 0; chunk < num_chunks; chunk++)
-    {
-        const std::int32_t tile_begin = chunk * chunk_tiles;
-        const std::int32_t tile_end = std::min(num_tiles, tile_begin + chunk_tiles);
-        const std::int32_t chunk_count = tile_end - tile_begin;
-
-        std::vector<float> vbuf(static_cast<std::size_t>(chunk_count) * 16 * inch);
-
-        for (std::int32_t lt = 0; lt < chunk_count; lt++)
-        {
-            const std::int32_t tile = tile_begin + lt;
-        const std::int32_t ty = tile / tiles_x;
-        const std::int32_t tx = tile % tiles_x;
-        float* vtile = vbuf.data() + static_cast<std::size_t>(lt) * 16 * inch;
-
-        for (std::int32_t q = 0; q < inch; q++)
-        {
-            const MatT src = input_pad.channel(q);
-            const float* d0 = src.row(ty * 2 + 0) + tx * 2;
-            const float* d1 = src.row(ty * 2 + 1) + tx * 2;
-            const float* d2 = src.row(ty * 2 + 2) + tx * 2;
-            const float* d3 = src.row(ty * 2 + 3) + tx * 2;
-
-            float t0[4], t1[4], t2[4], t3[4];
-            for (std::int32_t c = 0; c < 4; c++)
-            {
-                t0[c] = d0[c] - d2[c];
-                t1[c] = d1[c] + d2[c];
-                t2[c] = d2[c] - d1[c];
-                t3[c] = d1[c] - d3[c];
-            }
-            const float* tr[4] = {t0, t1, t2, t3};
-            for (std::int32_t i = 0; i < 4; i++)
-            {
-                const float* r = tr[i];
-                vtile[static_cast<std::size_t>((i * 4 + 0) * inch + q)] = r[0] - r[2];
-                vtile[static_cast<std::size_t>((i * 4 + 1) * inch + q)] = r[1] + r[2];
-                vtile[static_cast<std::size_t>((i * 4 + 2) * inch + q)] = r[2] - r[1];
-                vtile[static_cast<std::size_t>((i * 4 + 3) * inch + q)] = r[1] - r[3];
-            }
-        }
-        }
-
-        float mbuf[16 * kChannelBlock];
-        for (std::int32_t pb = 0; pb < pblocks; pb++)
-        {
-            const std::int32_t p0 = pb * kChannelBlock;
-            const std::int32_t np = outch - p0 < kChannelBlock ? outch - p0 : kChannelBlock;
-            const float* upb = up + static_cast<std::size_t>(pb) * 16 * inch * kChannelBlock;
-
-            for (std::int32_t lt = 0; lt < chunk_count; lt++)
-            {
-                const std::int32_t tile = tile_begin + lt;
-                const float* vtile = vbuf.data() + static_cast<std::size_t>(lt) * 16 * inch;
-            for (std::int32_t pos = 0; pos < 16; pos++)
-            {
-                const float* vrow = vtile + static_cast<std::size_t>(pos) * inch;
-                const float* urow = upb + static_cast<std::size_t>(pos) * inch * kChannelBlock;
-                float* mrow = mbuf + static_cast<std::size_t>(pos) * kChannelBlock;
-#if defined(__AVX2__)
-                if (np == kChannelBlock)
-                {
-                    for (std::int32_t g = 0; g < kChannelBlock; g += 8)
-                    {
-                        __m256 acc = _mm256_setzero_ps();
-                        for (std::int32_t q = 0; q < inch; q++)
-                        {
-                            const __m256 v = _mm256_set1_ps(vrow[q]);
-                            acc = _mm256_fmadd_ps(v, _mm256_loadu_ps(urow + q * kChannelBlock + g), acc);
-                        }
-                        _mm256_storeu_ps(mrow + g, acc);
-                    }
-                    continue;
-                }
-#endif
-                for (std::int32_t p = 0; p < np; p++)
-                {
-                    float sum = 0.f;
-                    for (std::int32_t q = 0; q < inch; q++)
-                    {
-                        sum += vrow[q] * urow[q * kChannelBlock + p];
-                    }
-                    mrow[p] = sum;
-                }
-            }
-
-            const std::int32_t ty = tile / tiles_x;
-            const std::int32_t tx = tile % tiles_x;
-            const std::int32_t oy = ty * 2;
-            const std::int32_t ox = tx * 2;
-
-            float yv[4][kChannelBlock];
-#if defined(__AVX2__)
-            if (np == kChannelBlock)
-            {
-                for (std::int32_t g = 0; g < kChannelBlock; g += 8)
-                {
-                    __m256 t0[4];
-                    __m256 t1[4];
-                    for (std::int32_t j = 0; j < 4; j++)
-                    {
-                        const __m256 m0 = _mm256_loadu_ps(mbuf + (0 * 4 + j) * kChannelBlock + g);
-                        const __m256 m1 = _mm256_loadu_ps(mbuf + (1 * 4 + j) * kChannelBlock + g);
-                        const __m256 m2 = _mm256_loadu_ps(mbuf + (2 * 4 + j) * kChannelBlock + g);
-                        const __m256 m3 = _mm256_loadu_ps(mbuf + (3 * 4 + j) * kChannelBlock + g);
-                        t0[j] = _mm256_add_ps(_mm256_add_ps(m0, m1), m2);
-                        t1[j] = _mm256_sub_ps(_mm256_sub_ps(m1, m2), m3);
-                    }
-                    _mm256_storeu_ps(yv[0] + g, _mm256_add_ps(_mm256_add_ps(t0[0], t0[1]), t0[2]));
-                    _mm256_storeu_ps(yv[1] + g, _mm256_sub_ps(_mm256_sub_ps(t0[1], t0[2]), t0[3]));
-                    _mm256_storeu_ps(yv[2] + g, _mm256_add_ps(_mm256_add_ps(t1[0], t1[1]), t1[2]));
-                    _mm256_storeu_ps(yv[3] + g, _mm256_sub_ps(_mm256_sub_ps(t1[1], t1[2]), t1[3]));
-                }
-            }
-            else
-#endif
-            {
-                for (std::int32_t p = 0; p < np; p++)
-                {
-                    float t0[4], t1[4];
-                    for (std::int32_t j = 0; j < 4; j++)
-                    {
-                        t0[j] = mbuf[(0 * 4 + j) * kChannelBlock + p] +
-                                mbuf[(1 * 4 + j) * kChannelBlock + p] +
-                                mbuf[(2 * 4 + j) * kChannelBlock + p];
-                        t1[j] = mbuf[(1 * 4 + j) * kChannelBlock + p] -
-                                mbuf[(2 * 4 + j) * kChannelBlock + p] -
-                                mbuf[(3 * 4 + j) * kChannelBlock + p];
-                    }
-                    yv[0][p] = t0[0] + t0[1] + t0[2];
-                    yv[1][p] = t0[1] - t0[2] - t0[3];
-                    yv[2][p] = t1[0] + t1[1] + t1[2];
-                    yv[3][p] = t1[1] - t1[2] - t1[3];
-                }
-            }
-
-            for (std::int32_t t = 0; t < np; t++)
-            {
-                const std::int32_t p = p0 + t;
-                const float bias = bias_data.empty() ? 0.f : bias_data[p];
-                float* op = top_blob.channel(p);
-                if (oy < outh && ox < outw)
-                {
-                    op[oy * outw + ox] = fused_activation(yv[0][t] + bias, activation_type, activation_params);
-                }
-                if (oy < outh && ox + 1 < outw)
-                {
-                    op[oy * outw + ox + 1] = fused_activation(yv[1][t] + bias, activation_type, activation_params);
-                }
-                if (oy + 1 < outh && ox < outw)
-                {
-                    op[(oy + 1) * outw + ox] = fused_activation(yv[2][t] + bias, activation_type, activation_params);
-                }
-                if (oy + 1 < outh && ox + 1 < outw)
-                {
-                    op[(oy + 1) * outw + ox + 1] = fused_activation(yv[3][t] + bias, activation_type, activation_params);
-                }
-            }
-            }
-        }
-    }
-
-
-    return 0;
-}
-
-MLAYER_CONVOLUTION_TEMPLATE
 std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::convolution_im2col(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
 {
     const std::int32_t outw = top_blob.w;
@@ -1228,6 +638,249 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
 }
 
 MLAYER_CONVOLUTION_TEMPLATE
+std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::convolution_gemm_pack(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
+{
+#if !defined(__AVX2__)
+    return convolution_im2col(bottom_blob, top_blob, weight_data, bias_data, kernel_w, kernel_h, stride_w, stride_h, dilation_w, dilation_h, activation_type, activation_params, opt);
+#else
+    const std::int32_t outw = top_blob.w;
+    const std::int32_t outh = top_blob.h;
+    const std::int32_t bch = bottom_blob.c;
+    const std::int32_t outch = top_blob.c;
+    const std::int32_t bw = bottom_blob.w;
+    const std::int32_t maxk = kernel_w * kernel_h;
+    const std::int32_t K = bch * maxk;
+    const std::int32_t N = outw * outh;
+
+    // Each tile holds 32 output pixels packed as four 8-pixel subtiles:
+    //   bt[sub * K * 8 + k * 8 + j] = bottom pixel (sub * 8 + j) at reduction k
+    // The tile is built once and reused by every output-channel block, so the
+    // im2col data is read from L1/L2 instead of being streamed from DRAM once
+    // per output block.
+    constexpr std::int32_t kSubtile = 8;
+    constexpr std::int32_t kSubtilesPerTile = 4;
+    constexpr std::int32_t kTileN = kSubtile * kSubtilesPerTile;
+    constexpr std::int32_t kOutBlock = 4;
+
+    const std::int32_t ntiles = (N + kTileN - 1) / kTileN;
+    const std::int32_t nout = (outch + kOutBlock - 1) / kOutBlock;
+    const std::int32_t threads = std::max(1, opt.num_threads);
+    // Split the output channels across threads only when there are fewer
+    // pixel tiles than threads (small feature maps).
+    const std::int32_t slices = ntiles >= threads ? 1 : std::min(nout, (threads + ntiles - 1) / ntiles);
+    const std::int32_t tasks = ntiles * slices;
+
+    const float* wbase = static_cast<const float*>(weight_data);
+    const float* bbase = bias_data.empty() ? nullptr : static_cast<const float*>(bias_data);
+    const bool plain_store = activation_type == 0;
+
+    #pragma omp parallel num_threads(threads)
+    {
+        std::vector<float> bt_storage(static_cast<std::size_t>(K) * kTileN);
+        float* bt = bt_storage.data();
+
+        #pragma omp for schedule(static)
+        for (std::int32_t task = 0; task < tasks; ++task)
+        {
+            const std::int32_t tile = task / slices;
+            const std::int32_t slice = task % slices;
+            const std::int32_t m0 = tile * kTileN;
+            const std::int32_t mcount = std::min(kTileN, N - m0);
+            const std::int32_t p_begin = nout * slice / slices;
+            const std::int32_t p_end = nout * (slice + 1) / slices;
+
+            // im2col gather, packed by output pixel.
+            for (std::int32_t sub = 0; sub < kSubtilesPerTile; ++sub)
+            {
+                const std::int32_t jbase = m0 + sub * kSubtile;
+                const std::int32_t jcount = std::min(kSubtile, N - jbase);
+                if (jcount <= 0)
+                {
+                    break;
+                }
+                float* bsub = bt + static_cast<std::size_t>(sub) * K * kSubtile;
+
+                std::int32_t offs[kSubtile];
+                for (std::int32_t j = 0; j < kSubtile; ++j)
+                {
+                    const std::int32_t m = jbase + std::min(j, jcount - 1);
+                    const std::int32_t oy = m / outw;
+                    const std::int32_t ox = m % outw;
+                    offs[j] = (oy * stride_h) * bw + ox * stride_w;
+                }
+
+                // 8 aligned output pixels from one row: one vector load/store.
+                const bool vector_ok = jcount == kSubtile && stride_w == 1 && ((jbase % outw) + kSubtile <= outw);
+
+                for (std::int32_t q = 0; q < bch; ++q)
+                {
+                    const float* ch = static_cast<const float*>(bottom_blob.channel(q));
+                    for (std::int32_t ky = 0; ky < kernel_h; ++ky)
+                    {
+                        const std::int32_t row_off = ky * dilation_h * bw;
+                        for (std::int32_t kx = 0; kx < kernel_w; ++kx)
+                        {
+                            const std::int32_t k = q * maxk + ky * kernel_w + kx;
+                            float* dst = bsub + static_cast<std::size_t>(k) * kSubtile;
+                            const std::int32_t col_off = row_off + kx * dilation_w;
+                            if (vector_ok)
+                            {
+                                _mm256_storeu_ps(dst, _mm256_loadu_ps(ch + offs[0] + col_off));
+                            }
+                            else
+                            {
+                                for (std::int32_t j = 0; j < kSubtile; ++j)
+                                {
+                                    dst[j] = j < jcount ? ch[offs[j] + col_off] : 0.f;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4 output channels x 8 pixels per micro tile.
+            for (std::int32_t pb = p_begin; pb < p_end; ++pb)
+            {
+                const std::int32_t p0 = pb * kOutBlock;
+                const std::int32_t np = std::min(kOutBlock, outch - p0);
+
+                if (np != kOutBlock)
+                {
+                    // Rare tail block: one output channel at a time.
+                    for (std::int32_t t = 0; t < np; ++t)
+                    {
+                        const std::int32_t p = p0 + t;
+                        const float* wp = wbase + static_cast<std::size_t>(p) * K;
+                        const float b = bbase == nullptr ? 0.f : bbase[p];
+                        float* op = top_blob.channel(p);
+                        for (std::int32_t m = m0; m < m0 + mcount; ++m)
+                        {
+                            const std::int32_t sub = (m - m0) / kSubtile;
+                            const std::int32_t j = (m - m0) % kSubtile;
+                            const float* bsub = bt + static_cast<std::size_t>(sub) * K * kSubtile;
+                            float sum = b;
+                            for (std::int32_t k = 0; k < K; ++k)
+                            {
+                                sum += bsub[k * kSubtile + j] * wp[k];
+                            }
+                            op[m] = fused_activation(sum, activation_type, activation_params);
+                        }
+                    }
+                    continue;
+                }
+
+                const float* w0 = wbase + static_cast<std::size_t>(p0 + 0) * K;
+                const float* w1 = wbase + static_cast<std::size_t>(p0 + 1) * K;
+                const float* w2 = wbase + static_cast<std::size_t>(p0 + 2) * K;
+                const float* w3 = wbase + static_cast<std::size_t>(p0 + 3) * K;
+                const float b0 = bbase == nullptr ? 0.f : bbase[p0 + 0];
+                const float b1 = bbase == nullptr ? 0.f : bbase[p0 + 1];
+                const float b2 = bbase == nullptr ? 0.f : bbase[p0 + 2];
+                const float b3 = bbase == nullptr ? 0.f : bbase[p0 + 3];
+                float* o0 = top_blob.channel(p0 + 0);
+                float* o1 = top_blob.channel(p0 + 1);
+                float* o2 = top_blob.channel(p0 + 2);
+                float* o3 = top_blob.channel(p0 + 3);
+
+                // Pair two 8-pixel subtiles per reduction step so each
+                // broadcast weight feeds 16 multiply-adds.
+                for (std::int32_t sub = 0; sub < kSubtilesPerTile; sub += 2)
+                {
+                    const std::int32_t jbase0 = m0 + sub * kSubtile;
+                    const std::int32_t jcount0 = std::min(kSubtile, N - jbase0);
+                    if (jcount0 <= 0)
+                    {
+                        break;
+                    }
+                    const std::int32_t jbase1 = jbase0 + kSubtile;
+                    const std::int32_t jcount1 = std::min(kSubtile, N - jbase1);
+                    const float* bsub0 = bt + static_cast<std::size_t>(sub) * K * kSubtile;
+                    const float* bsub1 = bsub0 + static_cast<std::size_t>(K) * kSubtile;
+
+                    __m256 a00 = _mm256_setzero_ps();
+                    __m256 a01 = _mm256_setzero_ps();
+                    __m256 a02 = _mm256_setzero_ps();
+                    __m256 a03 = _mm256_setzero_ps();
+                    __m256 a10 = _mm256_setzero_ps();
+                    __m256 a11 = _mm256_setzero_ps();
+                    __m256 a12 = _mm256_setzero_ps();
+                    __m256 a13 = _mm256_setzero_ps();
+                    for (std::int32_t k = 0; k < K; ++k)
+                    {
+                        const __m256 v0 = _mm256_loadu_ps(bsub0 + k * kSubtile);
+                        const __m256 v1 = jcount1 > 0 ? _mm256_loadu_ps(bsub1 + k * kSubtile) : _mm256_setzero_ps();
+                        const __m256 wv0 = _mm256_broadcast_ss(w0 + k);
+                        const __m256 wv1 = _mm256_broadcast_ss(w1 + k);
+                        const __m256 wv2 = _mm256_broadcast_ss(w2 + k);
+                        const __m256 wv3 = _mm256_broadcast_ss(w3 + k);
+                        a00 = _mm256_fmadd_ps(v0, wv0, a00);
+                        a01 = _mm256_fmadd_ps(v0, wv1, a01);
+                        a02 = _mm256_fmadd_ps(v0, wv2, a02);
+                        a03 = _mm256_fmadd_ps(v0, wv3, a03);
+                        a10 = _mm256_fmadd_ps(v1, wv0, a10);
+                        a11 = _mm256_fmadd_ps(v1, wv1, a11);
+                        a12 = _mm256_fmadd_ps(v1, wv2, a12);
+                        a13 = _mm256_fmadd_ps(v1, wv3, a13);
+                    }
+
+                    if (jcount0 == kSubtile && jcount1 == kSubtile && plain_store)
+                    {
+                        const __m256 vb0 = _mm256_set1_ps(b0);
+                        const __m256 vb1 = _mm256_set1_ps(b1);
+                        const __m256 vb2 = _mm256_set1_ps(b2);
+                        const __m256 vb3 = _mm256_set1_ps(b3);
+                        _mm256_storeu_ps(o0 + jbase0, _mm256_add_ps(a00, vb0));
+                        _mm256_storeu_ps(o1 + jbase0, _mm256_add_ps(a01, vb1));
+                        _mm256_storeu_ps(o2 + jbase0, _mm256_add_ps(a02, vb2));
+                        _mm256_storeu_ps(o3 + jbase0, _mm256_add_ps(a03, vb3));
+                        _mm256_storeu_ps(o0 + jbase1, _mm256_add_ps(a10, vb0));
+                        _mm256_storeu_ps(o1 + jbase1, _mm256_add_ps(a11, vb1));
+                        _mm256_storeu_ps(o2 + jbase1, _mm256_add_ps(a12, vb2));
+                        _mm256_storeu_ps(o3 + jbase1, _mm256_add_ps(a13, vb3));
+                    }
+                    else
+                    {
+                        alignas(32) float r0[kSubtile];
+                        alignas(32) float r1[kSubtile];
+                        alignas(32) float r2[kSubtile];
+                        alignas(32) float r3[kSubtile];
+                        _mm256_store_ps(r0, a00);
+                        _mm256_store_ps(r1, a01);
+                        _mm256_store_ps(r2, a02);
+                        _mm256_store_ps(r3, a03);
+                        for (std::int32_t j = 0; j < jcount0; ++j)
+                        {
+                            o0[jbase0 + j] = fused_activation(r0[j] + b0, activation_type, activation_params);
+                            o1[jbase0 + j] = fused_activation(r1[j] + b1, activation_type, activation_params);
+                            o2[jbase0 + j] = fused_activation(r2[j] + b2, activation_type, activation_params);
+                            o3[jbase0 + j] = fused_activation(r3[j] + b3, activation_type, activation_params);
+                        }
+                        if (jcount1 > 0)
+                        {
+                            _mm256_store_ps(r0, a10);
+                            _mm256_store_ps(r1, a11);
+                            _mm256_store_ps(r2, a12);
+                            _mm256_store_ps(r3, a13);
+                            for (std::int32_t j = 0; j < jcount1; ++j)
+                            {
+                                o0[jbase1 + j] = fused_activation(r0[j] + b0, activation_type, activation_params);
+                                o1[jbase1 + j] = fused_activation(r1[j] + b1, activation_type, activation_params);
+                                o2[jbase1 + j] = fused_activation(r2[j] + b2, activation_type, activation_params);
+                                o3[jbase1 + j] = fused_activation(r3[j] + b3, activation_type, activation_params);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return 0;
+#endif
+}
+
+MLAYER_CONVOLUTION_TEMPLATE
 std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::forward(const MatT& bottom_blob, MatT& top_blob, const OptionT& opt) const
 {
     if constexpr (Int8)
@@ -1269,19 +922,16 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
     if (top_blob.empty())
         return -100;
 
+    if (elemsize == 4u && dilation_w == 1 && dilation_h == 1 &&
+        ((kernel_w == 1 && kernel_h == 1 && stride_w == 1 && stride_h == 1) ||
+         (kernel_w == 3 && kernel_h == 3 && stride_w == stride_h && (stride_w == 1 || stride_w == 2))))
+    {
+        return convolution_gemm_pack(bottom_blob_bordered, top_blob, weight_data, bias_data, kernel_w, kernel_h, stride_w, stride_h, dilation_w, dilation_h, activation_type, activation_params, opt);
+    }
+
     if (kernel_w == 1 && kernel_h == 1 && stride_w == 1 && stride_h == 1 && dilation_w == 1 && dilation_h == 1)
     {
         return convolution_1x1(bottom_blob_bordered, top_blob, weight_data, bias_data, activation_type, activation_params, opt);
-    }
-
-    if (kernel_w == 3 && kernel_h == 3 && stride_w == 1 && stride_h == 1 && dilation_w == 1 && dilation_h == 1 &&
-        elemsize == 4u && num_output >= 8 && bottom_blob_bordered.c >= 4)
-    {
-        if (outw * outh >= 4096 && bottom_blob_bordered.c >= 32)
-        {
-            return convolution_3x3s1_winograd43(bottom_blob_bordered, top_blob, weight_data, bias_data, activation_type, activation_params, opt);
-        }
-        return convolution_3x3s1_winograd(bottom_blob_bordered, top_blob, weight_data, bias_data, activation_type, activation_params, opt);
     }
 
     const std::size_t im2col_bytes = static_cast<std::size_t>(kernel_w) * kernel_h * bottom_blob_bordered.c *
