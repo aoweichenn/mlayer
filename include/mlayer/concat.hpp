@@ -172,12 +172,15 @@ std::int32_t Concat<LayerT, MatT, OptionT, ParamDictT>::forward(const std::vecto
         {
             const MatT& bottom_blob = bottom_blobs[b];
 
-            std::int32_t channels = bottom_blob.c;
-            std::size_t size = bottom_blob.cstep * channels;
+            const std::int32_t channels = bottom_blob.c;
+            const std::size_t channel_bytes =
+                static_cast<std::size_t>(w) * h * d * elemsize;
 
-            const unsigned char* ptr = bottom_blob;
-            unsigned char* outptr = top_blob.channel(q);
-            memcpy(outptr, ptr, size * elemsize);
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (std::int32_t c = 0; c < channels; c++)
+            {
+                std::memcpy(top_blob.channel(q + c).data, bottom_blob.channel(c).data, channel_bytes);
+            }
 
             q += channels;
         }

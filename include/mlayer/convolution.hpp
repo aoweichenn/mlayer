@@ -44,6 +44,8 @@ protected:
 
     static std::int32_t convolution_1x1(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
 
+    static std::int32_t convolution_im2col(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
+
 public:
     std::int32_t num_output;
     std::int32_t kernel_w;
@@ -354,6 +356,94 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
         for (std::int32_t i = 0; i < size; i++)
         {
             outptr[i] = Activation(outptr[i], activation_type, activation_params);
+        }
+    }
+
+    return 0;
+}
+
+MLAYER_CONVOLUTION_TEMPLATE
+std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::convolution_im2col(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
+{
+    constexpr std::int32_t kTile = 128;
+
+    const std::int32_t outw = top_blob.w;
+    const std::int32_t outh = top_blob.h;
+    const std::int32_t inch = bottom_blob.c;
+    const std::int32_t outch = top_blob.c;
+    const std::int32_t maxk = kernel_w * kernel_h;
+    const std::int32_t K = inch * maxk;
+    const std::int32_t M = outw * outh;
+
+    MatT col(K, kTile, 4u, opt.workspace_allocator);
+    if (col.empty())
+    {
+        return -100;
+    }
+
+    for (std::int32_t m0 = 0; m0 < M; m0 += kTile)
+    {
+        const std::int32_t mt = M - m0 < kTile ? M - m0 : kTile;
+
+        for (std::int32_t t = 0; t < mt; t++)
+        {
+            const std::int32_t m = m0 + t;
+            const std::int32_t oy = m / outw;
+            const std::int32_t ox = m % outw;
+            float* cp = col.row(t);
+
+            for (std::int32_t q = 0; q < inch; q++)
+            {
+                const MatT src = bottom_blob.channel(q);
+                for (std::int32_t ky = 0; ky < kernel_h; ky++)
+                {
+                    const float* sptr = src.row(oy * stride_h + ky * dilation_h) + ox * stride_w;
+                    float* dst = cp + q * maxk + ky * kernel_w;
+                    for (std::int32_t kx = 0; kx < kernel_w; kx++)
+                    {
+                        dst[kx] = sptr[kx * dilation_w];
+                    }
+                }
+            }
+        }
+
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (std::int32_t p = 0; p < outch; p++)
+        {
+            const float* wp = static_cast<const float*>(weight_data) + p * K;
+            const float bias = bias_data.empty() ? 0.f : bias_data[p];
+            float* outptr = top_blob.channel(p) + m0;
+
+            for (std::int32_t t = 0; t < mt; t++)
+            {
+                const float* cp = col.row(t);
+                float sum = bias;
+
+#if defined(__AVX2__)
+                __m256 acc = _mm256_setzero_ps();
+                std::int32_t k = 0;
+                for (; k + 8 <= K; k += 8)
+                {
+                    acc = _mm256_fmadd_ps(_mm256_loadu_ps(cp + k), _mm256_loadu_ps(wp + k), acc);
+                }
+                __m128 lo = _mm256_castps256_ps128(acc);
+                __m128 hi = _mm256_extractf128_ps(acc, 1);
+                __m128 s128 = _mm_add_ps(lo, hi);
+                s128 = _mm_hadd_ps(s128, s128);
+                s128 = _mm_hadd_ps(s128, s128);
+                sum += _mm_cvtss_f32(s128);
+                for (; k < K; k++)
+                {
+                    sum += cp[k] * wp[k];
+                }
+#else
+                for (std::int32_t k = 0; k < K; k++)
+                {
+                    sum += cp[k] * wp[k];
+                }
+#endif
+                outptr[t] = Activation(sum, activation_type, activation_params);
+            }
         }
     }
 
