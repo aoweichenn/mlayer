@@ -62,6 +62,7 @@
 | `Gemm` | `include/mlayer/gemm.hpp` | fp32（含 AVX2/FMA）与 int8 block 量化 Gemm |
 | `RotaryEmbed` | `include/mlayer/rotaryembed.hpp` | RoPE，interleaved/半宽 cache |
 | `SDPA` | `include/mlayer/sdpa.hpp` | scaled dot-product attention + KV cache |
+| `MultiHeadAttention` | `include/mlayer/multiheadattention.hpp` | fp32 + weight-block int4/int6/int8 + legacy int8，含 KV cache / mask |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
