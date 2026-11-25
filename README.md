@@ -63,6 +63,7 @@
 | `RotaryEmbed` | `include/mlayer/rotaryembed.hpp` | RoPE，interleaved/半宽 cache |
 | `SDPA` | `include/mlayer/sdpa.hpp` | scaled dot-product attention + KV cache |
 | `MultiHeadAttention` | `include/mlayer/multiheadattention.hpp` | fp32 + weight-block int4/int6/int8 + legacy int8，含 KV cache / mask |
+| `ROIPooling` | `include/mlayer/roipooling.hpp` | Faster-RCNN ROI max pooling（单 ROI、spatial scale） |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
