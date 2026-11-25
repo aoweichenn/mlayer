@@ -55,6 +55,10 @@
 | `Reshape` | `include/mlayer/reshape.hpp` | 数值参数与简单 shape 表达式 |
 | `MatMul` | `include/mlayer/matmul.hpp` | 1D–4D 矩阵乘，transB |
 | `Interp` | `include/mlayer/interp.hpp` | nearest / bilinear 上采样 |
+| `Embed` | `include/mlayer/embed.hpp` | token embedding 查表 |
+| `Gemm` | `include/mlayer/gemm.hpp` | 标准 fp32 Gemm（int8 量化路径待补） |
+| `RotaryEmbed` | `include/mlayer/rotaryembed.hpp` | RoPE，interleaved/半宽 cache |
+| `SDPA` | `include/mlayer/sdpa.hpp` | scaled dot-product attention + KV cache |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
