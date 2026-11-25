@@ -15,12 +15,19 @@ namespace mlayer {
 
 // Causal depthwise short convolution with a rolling state, as used by the
 // Qwen3.5 gated-delta-rule blocks.
-template<typename LayerT, typename MatT, typename OptionT>
+template<typename LayerT, typename MatT, typename OptionT, typename ParamDictT>
 class ShortConv : public LayerT {
 public:
     ShortConv() {
         this->one_blob_only = false;
         this->support_inplace = false;
+        this->activation_type = 1;
+    }
+
+    // 0 = none, 1 = silu (default, keeps the Qwen3.5 gated-delta-rule models).
+    std::int32_t load_param(const ParamDictT& pd) override {
+        this->activation_type = pd.get(0, 1);
+        return 0;
     }
 
     std::int32_t forward(const std::vector<MatT>& bottom_blobs, std::vector<MatT>& top_blobs,
@@ -140,7 +147,7 @@ public:
                 for (std::int32_t k = 0; k < kernel_size; ++k) {
                     sum += stated_mixed_qkv.row(base - (kernel_size - 1) + k)[g] * weight[k];
                 }
-                const float activated = sum * (1.0F / (1.0F + std::exp(-sum)));
+                const float activated = this->activation_type == 1 ? sum * (1.0F / (1.0F + std::exp(-sum))) : sum;
                 if (channel_major) {
                     top_blob.row(g)[t] = activated;
                 } else {
@@ -151,6 +158,7 @@ public:
 
         return 0;
     }
+    std::int32_t activation_type;
 };
 
 }  // namespace mlayer
