@@ -44,6 +44,11 @@ protected:
 
     static std::int32_t convolution_1x1(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
 
+    static float fused_activation(float v, std::int32_t type, const MatT& params)
+    {
+        return type == 0 ? v : Activation(v, type, params);
+    }
+
 #if defined(__AVX2__)
     static __m128 hsum8(__m256 v)
     {
@@ -309,7 +314,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                     kptr += maxk;
                 }
 
-                outptr[j] = Activation(sum, activation_type, activation_params);
+                outptr[j] = fused_activation(sum, activation_type, activation_params);
             }
 
             outptr += outw;
@@ -420,7 +425,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
         {
             for (std::int32_t i = 0; i < size; i++)
             {
-                outptr[t][i] = Activation(outptr[t][i], activation_type, activation_params);
+                outptr[t][i] = fused_activation(outptr[t][i], activation_type, activation_params);
             }
         }
     }
@@ -678,19 +683,19 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                 float* op = top_blob.channel(p);
                 if (oy < outh && ox < outw)
                 {
-                    op[oy * outw + ox] = Activation(yv[0][t] + bias, activation_type, activation_params);
+                    op[oy * outw + ox] = fused_activation(yv[0][t] + bias, activation_type, activation_params);
                 }
                 if (oy < outh && ox + 1 < outw)
                 {
-                    op[oy * outw + ox + 1] = Activation(yv[1][t] + bias, activation_type, activation_params);
+                    op[oy * outw + ox + 1] = fused_activation(yv[1][t] + bias, activation_type, activation_params);
                 }
                 if (oy + 1 < outh && ox < outw)
                 {
-                    op[(oy + 1) * outw + ox] = Activation(yv[2][t] + bias, activation_type, activation_params);
+                    op[(oy + 1) * outw + ox] = fused_activation(yv[2][t] + bias, activation_type, activation_params);
                 }
                 if (oy + 1 < outh && ox + 1 < outw)
                 {
-                    op[(oy + 1) * outw + ox + 1] = Activation(yv[3][t] + bias, activation_type, activation_params);
+                    op[(oy + 1) * outw + ox + 1] = fused_activation(yv[3][t] + bias, activation_type, activation_params);
                 }
             }
             }
@@ -815,14 +820,14 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                     sum7 += c * wptr[7][k];
                 }
 
-                outptr[0][m] = Activation(sum0, activation_type, activation_params);
-                outptr[1][m] = Activation(sum1, activation_type, activation_params);
-                outptr[2][m] = Activation(sum2, activation_type, activation_params);
-                outptr[3][m] = Activation(sum3, activation_type, activation_params);
-                outptr[4][m] = Activation(sum4, activation_type, activation_params);
-                outptr[5][m] = Activation(sum5, activation_type, activation_params);
-                outptr[6][m] = Activation(sum6, activation_type, activation_params);
-                outptr[7][m] = Activation(sum7, activation_type, activation_params);
+                outptr[0][m] = fused_activation(sum0, activation_type, activation_params);
+                outptr[1][m] = fused_activation(sum1, activation_type, activation_params);
+                outptr[2][m] = fused_activation(sum2, activation_type, activation_params);
+                outptr[3][m] = fused_activation(sum3, activation_type, activation_params);
+                outptr[4][m] = fused_activation(sum4, activation_type, activation_params);
+                outptr[5][m] = fused_activation(sum5, activation_type, activation_params);
+                outptr[6][m] = fused_activation(sum6, activation_type, activation_params);
+                outptr[7][m] = fused_activation(sum7, activation_type, activation_params);
             }
 #else
             for (std::int32_t m = 0; m < M; m++)
@@ -848,14 +853,14 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                     sum6 += c * wptr[6][k];
                     sum7 += c * wptr[7][k];
                 }
-                outptr[0][m] = Activation(sum0, activation_type, activation_params);
-                outptr[1][m] = Activation(sum1, activation_type, activation_params);
-                outptr[2][m] = Activation(sum2, activation_type, activation_params);
-                outptr[3][m] = Activation(sum3, activation_type, activation_params);
-                outptr[4][m] = Activation(sum4, activation_type, activation_params);
-                outptr[5][m] = Activation(sum5, activation_type, activation_params);
-                outptr[6][m] = Activation(sum6, activation_type, activation_params);
-                outptr[7][m] = Activation(sum7, activation_type, activation_params);
+                outptr[0][m] = fused_activation(sum0, activation_type, activation_params);
+                outptr[1][m] = fused_activation(sum1, activation_type, activation_params);
+                outptr[2][m] = fused_activation(sum2, activation_type, activation_params);
+                outptr[3][m] = fused_activation(sum3, activation_type, activation_params);
+                outptr[4][m] = fused_activation(sum4, activation_type, activation_params);
+                outptr[5][m] = fused_activation(sum5, activation_type, activation_params);
+                outptr[6][m] = fused_activation(sum6, activation_type, activation_params);
+                outptr[7][m] = fused_activation(sum7, activation_type, activation_params);
             }
 #endif
         }
@@ -873,7 +878,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                     {
                         sum += cp[k] * wp[k];
                     }
-                    op[m] = Activation(sum, activation_type, activation_params);
+                    op[m] = fused_activation(sum, activation_type, activation_params);
                 }
             }
         }
@@ -1152,7 +1157,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                 if (bias_term)
                     sumfp32 += bias_data[p];
 
-                sumfp32 = Activation(sumfp32, activation_type, activation_params);
+                sumfp32 = fused_activation(sumfp32, activation_type, activation_params);
 
                 if (use_int8_requantize)
                 {
