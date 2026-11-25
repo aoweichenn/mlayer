@@ -161,7 +161,11 @@ std::int32_t Concat<LayerT, MatT, OptionT, ParamDictT>::forward(const std::vecto
         }
 
         MatT& top_blob = top_blobs[0];
-        top_blob.create(w, h, d, top_channels, elemsize, opt.blob_allocator);
+        // 3-D blobs have d == 0; using the 4-D overload would allocate nothing.
+        if (dims == 3)
+            top_blob.create(w, h, top_channels, elemsize, opt.blob_allocator);
+        else
+            top_blob.create(w, h, d, top_channels, elemsize, opt.blob_allocator);
         if (top_blob.empty())
             return -100;
 
@@ -202,7 +206,10 @@ std::int32_t Concat<LayerT, MatT, OptionT, ParamDictT>::forward(const std::vecto
         }
 
         MatT& top_blob = top_blobs[0];
-        top_blob.create(w, top_h, d, channels, elemsize, opt.blob_allocator);
+        if (dims == 3)
+            top_blob.create(w, top_h, channels, elemsize, opt.blob_allocator);
+        else
+            top_blob.create(w, top_h, d, channels, elemsize, opt.blob_allocator);
         if (top_blob.empty())
             return -100;
 

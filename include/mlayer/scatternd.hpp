@@ -45,7 +45,7 @@ public:
             return -100;
         }
         const std::int32_t count = ranked ? indices.h * indices.c : indices.w * indices.h;
-        if (updates.w != count || updates.h * updates.c != 1) {
+        if (updates.w * updates.h * updates.c != count) {
             return -100;
         }
 
