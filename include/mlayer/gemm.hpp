@@ -253,40 +253,43 @@ public:
         }
 
         const std::int32_t K = A.w;
+        const std::size_t out_hstep = top.dims == 3 ? top.cstep : static_cast<std::size_t>(top.w);
+        const std::size_t A_hstep = A.dims == 3 ? A.cstep : static_cast<std::size_t>(A.w);
+        const std::size_t BT_hstep = BT.dims == 3 ? BT.cstep : static_cast<std::size_t>(BT.w);
+        const float* ptrC = C.empty() ? nullptr : static_cast<const float*>(C);
+        const float* ptrA_all = static_cast<const float*>(A);
+        const float* ptrBT_all = static_cast<const float*>(BT);
+
 #pragma omp parallel for num_threads(opt.num_threads)
-        for (std::int32_t i = 0; i < M; ++i) {
-            const std::size_t out_hstep = top.dims == 3 ? top.cstep : static_cast<std::size_t>(top.w);
-            const std::size_t A_hstep = A.dims == 3 ? A.cstep : static_cast<std::size_t>(A.w);
-            const std::size_t BT_hstep = BT.dims == 3 ? BT.cstep : static_cast<std::size_t>(BT.w);
-            const float* ptrA = static_cast<const float*>(A) + static_cast<std::size_t>(i) * A_hstep;
-            const float* ptrC = C.empty() ? nullptr : static_cast<const float*>(C);
+        for (std::int32_t mn = 0; mn < M * N; ++mn) {
+            const std::int32_t i = mn / N;
+            const std::int32_t j = mn % N;
+            const float* ptrA = ptrA_all + static_cast<std::size_t>(i) * A_hstep;
+            const float* ptrBT = ptrBT_all + static_cast<std::size_t>(j) * BT_hstep;
 
-            for (std::int32_t j = 0; j < N; ++j) {
-                const float* ptrBT = static_cast<const float*>(BT) + static_cast<std::size_t>(j) * BT_hstep;
-                float sum = 0.0F;
-                if (ptrC != nullptr) {
-                    if (broadcast_type_C == 0) {
-                        sum = ptrC[0];
-                    } else if (broadcast_type_C == 1 || broadcast_type_C == 2) {
-                        sum = ptrC[static_cast<std::size_t>(i)];
-                    } else if (broadcast_type_C == 3) {
-                        sum = ptrC[static_cast<std::size_t>(i) * static_cast<std::size_t>(N) +
-                                   static_cast<std::size_t>(j)];
-                    } else if (broadcast_type_C == 4) {
-                        sum = ptrC[static_cast<std::size_t>(j)];
-                    }
-                    sum *= this->beta;
+            float sum = 0.0F;
+            if (ptrC != nullptr) {
+                if (broadcast_type_C == 0) {
+                    sum = ptrC[0];
+                } else if (broadcast_type_C == 1 || broadcast_type_C == 2) {
+                    sum = ptrC[static_cast<std::size_t>(i)];
+                } else if (broadcast_type_C == 3) {
+                    sum = ptrC[static_cast<std::size_t>(i) * static_cast<std::size_t>(N) +
+                               static_cast<std::size_t>(j)];
+                } else if (broadcast_type_C == 4) {
+                    sum = ptrC[static_cast<std::size_t>(j)];
                 }
-                for (std::int32_t k = 0; k < K; ++k) {
-                    sum += ptrA[k] * ptrBT[k];
-                }
-                sum *= this->alpha;
+                sum *= this->beta;
+            }
+            for (std::int32_t k = 0; k < K; ++k) {
+                sum += ptrA[k] * ptrBT[k];
+            }
+            sum *= this->alpha;
 
-                if (this->output_transpose != 0) {
-                    top[static_cast<std::size_t>(j) * out_hstep + static_cast<std::size_t>(i)] = sum;
-                } else {
-                    top[static_cast<std::size_t>(i) * out_hstep + static_cast<std::size_t>(j)] = sum;
-                }
+            if (this->output_transpose != 0) {
+                top[static_cast<std::size_t>(j) * out_hstep + static_cast<std::size_t>(i)] = sum;
+            } else {
+                top[static_cast<std::size_t>(i) * out_hstep + static_cast<std::size_t>(j)] = sum;
             }
         }
         return 0;
