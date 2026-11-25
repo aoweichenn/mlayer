@@ -311,10 +311,28 @@ private:
         }
 
         outdims = count;
-        outw = count > 0 ? out_shape[0] : 1;
-        outh = count > 1 ? out_shape[1] : 1;
-        outd = count > 2 ? out_shape[2] : 1;
-        outc = count > 3 ? out_shape[3] : 1;
+        outw = 1;
+        outh = 1;
+        outd = 1;
+        outc = 1;
+        if (count == 1) {
+            outw = out_shape[0];
+        }
+        if (count == 2) {
+            outw = out_shape[0];
+            outh = out_shape[1];
+        }
+        if (count == 3) {
+            outw = out_shape[0];
+            outh = out_shape[1];
+            outc = out_shape[2];
+        }
+        if (count == 4) {
+            outw = out_shape[0];
+            outh = out_shape[1];
+            outd = out_shape[2];
+            outc = out_shape[3];
+        }
     }
 };
 

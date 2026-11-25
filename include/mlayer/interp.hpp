@@ -78,15 +78,39 @@ public:
                 const float scale_x = static_cast<float>(w) / static_cast<float>(outw);
                 const float scale_y = static_cast<float>(h) / static_cast<float>(outh);
                 for (std::int32_t y = 0; y < outh; ++y) {
-                    const float fy = (static_cast<float>(y) + 0.5F) * scale_y - 0.5F;
-                    const std::int32_t y0 = fy < 0.0F ? 0 : static_cast<std::int32_t>(fy);
-                    const std::int32_t y1 = y0 + 1 < h ? y0 + 1 : h - 1;
-                    const float dy = fy - static_cast<float>(y0);
+                    float fy = (static_cast<float>(y) + 0.5F) * scale_y - 0.5F;
+                    std::int32_t y0 = static_cast<std::int32_t>(std::floor(fy));
+                    fy -= static_cast<float>(y0);
+                    if (y0 < 0) {
+                        y0 = 0;
+                        fy = 0.0F;
+                    }
+                    if (h == 1) {
+                        y0 = 0;
+                        fy = 0.0F;
+                    } else if (y0 >= h - 1) {
+                        y0 = h - 2;
+                        fy = 1.0F;
+                    }
+                    const std::int32_t y1 = y0 + 1;
+                    const float dy = fy;
                     for (std::int32_t x = 0; x < outw; ++x) {
-                        const float fx = (static_cast<float>(x) + 0.5F) * scale_x - 0.5F;
-                        const std::int32_t x0 = fx < 0.0F ? 0 : static_cast<std::int32_t>(fx);
-                        const std::int32_t x1 = x0 + 1 < w ? x0 + 1 : w - 1;
-                        const float dx = fx - static_cast<float>(x0);
+                        float fx = (static_cast<float>(x) + 0.5F) * scale_x - 0.5F;
+                        std::int32_t x0 = static_cast<std::int32_t>(std::floor(fx));
+                        fx -= static_cast<float>(x0);
+                        if (x0 < 0) {
+                            x0 = 0;
+                            fx = 0.0F;
+                        }
+                        if (w == 1) {
+                            x0 = 0;
+                            fx = 0.0F;
+                        } else if (x0 >= w - 1) {
+                            x0 = w - 2;
+                            fx = 1.0F;
+                        }
+                        const std::int32_t x1 = x0 + 1;
+                        const float dx = fx;
 
                         const float v00 = src[y0 * w + x0];
                         const float v01 = src[y0 * w + x1];
