@@ -16,7 +16,9 @@ template<typename LayerT, typename MatT, typename OptionT, typename ParamDictT, 
 class Crop : public LayerT {
 public:
     Crop() {
-        this->one_blob_only = true;
+        // Both the single-input and reference-input forms go through the
+        // vector forward overload.
+        this->one_blob_only = false;
         this->support_inplace = false;
     }
 
@@ -44,11 +46,6 @@ public:
             }
         }
 
-        const bool numpy_style_slice = !this->starts.empty() && !this->ends.empty();
-        if (this->outw == 0 && this->outh == 0 && this->outd == 0 && this->outc == 0 && this->woffset2 == 0 &&
-            this->hoffset2 == 0 && this->doffset2 == 0 && this->coffset2 == 0 && !numpy_style_slice) {
-            this->one_blob_only = false;
-        }
         return 0;
     }
 
@@ -65,7 +62,7 @@ public:
         std::int32_t q0 = this->coffset;
         std::int32_t ow = this->outw;
         std::int32_t oh = this->outh;
-        std::int32_t od = this->outd;
+        std::int32_t od = this->outd > 0 ? this->outd : 1;
         std::int32_t oc = this->outc;
 
         if (bottom_blobs.size() > 1) {
@@ -73,7 +70,7 @@ public:
             const std::int32_t dims = bottom.dims;
             ow = reference.w;
             oh = reference.h;
-            od = reference.d;
+            od = reference.d > 0 ? reference.d : 1;
             oc = reference.dims >= 3 ? reference.c : bottom.c;
             if (dims == 1) {
                 ow = reference.w;
