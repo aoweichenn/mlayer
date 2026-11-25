@@ -88,7 +88,7 @@ std::int32_t Scale<LayerT, MatT, OptionT, ParamDictT, ModelBinT>::forward_inplac
             #pragma omp parallel for num_threads(opt.num_threads)
             for (std::int32_t i = 0; i < w; i++)
             {
-                ptr[i] = ptr[i] * scale_blob[i] + bias_data[i];
+                ptr[i] = ptr[i] * scale_blob[static_cast<std::size_t>(i)] + bias_data[static_cast<std::size_t>(i)];
             }
         }
         else
@@ -96,7 +96,7 @@ std::int32_t Scale<LayerT, MatT, OptionT, ParamDictT, ModelBinT>::forward_inplac
             #pragma omp parallel for num_threads(opt.num_threads)
             for (std::int32_t i = 0; i < w; i++)
             {
-                ptr[i] *= scale_blob[i];
+                ptr[i] *= scale_blob[static_cast<std::size_t>(i)];
             }
         }
     }
@@ -112,8 +112,8 @@ std::int32_t Scale<LayerT, MatT, OptionT, ParamDictT, ModelBinT>::forward_inplac
             for (std::int32_t i = 0; i < h; i++)
             {
                 float* ptr = bottom_top_blob.row(i);
-                float s = scale_blob[i];
-                float bias = bias_data[i];
+                float s = scale_blob[static_cast<std::size_t>(i)];
+                float bias = bias_data[static_cast<std::size_t>(i)];
 
                 for (std::int32_t j = 0; j < w; j++)
                 {
@@ -127,7 +127,7 @@ std::int32_t Scale<LayerT, MatT, OptionT, ParamDictT, ModelBinT>::forward_inplac
             for (std::int32_t i = 0; i < h; i++)
             {
                 float* ptr = bottom_top_blob.row(i);
-                float s = scale_blob[i];
+                float s = scale_blob[static_cast<std::size_t>(i)];
 
                 for (std::int32_t j = 0; j < w; j++)
                 {
@@ -152,8 +152,8 @@ std::int32_t Scale<LayerT, MatT, OptionT, ParamDictT, ModelBinT>::forward_inplac
             {
                 float* ptr = bottom_top_blob.channel(q);
 
-                float s = scale_blob[q];
-                float bias = bias_data[q];
+                float s = scale_blob[static_cast<std::size_t>(q)];
+                float bias = bias_data[static_cast<std::size_t>(q)];
 
                 for (std::int32_t i = 0; i < size; i++)
                 {
@@ -168,7 +168,7 @@ std::int32_t Scale<LayerT, MatT, OptionT, ParamDictT, ModelBinT>::forward_inplac
             {
                 float* ptr = bottom_top_blob.channel(q);
 
-                float s = scale_blob[q];
+                float s = scale_blob[static_cast<std::size_t>(q)];
 
                 for (std::int32_t i = 0; i < size; i++)
                 {

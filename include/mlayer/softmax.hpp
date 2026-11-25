@@ -146,7 +146,7 @@ std::int32_t Softmax<LayerT, MatT, OptionT, ParamDictT>::forward_inplace(MatT& b
         #pragma omp parallel for num_threads(opt.num_threads)
         for (std::int32_t i = 0; i < w; i++)
         {
-            float* ptr = (float*)bottom_top_blob + i;
+            float* ptr = static_cast<float*>(bottom_top_blob) + i;
 
             softmax(ptr, h, w);
         }
@@ -170,9 +170,9 @@ std::int32_t Softmax<LayerT, MatT, OptionT, ParamDictT>::forward_inplace(MatT& b
         #pragma omp parallel for num_threads(opt.num_threads)
         for (std::int32_t i = 0; i < size; i++)
         {
-            float* ptr = (float*)bottom_top_blob + i;
+            float* ptr = static_cast<float*>(bottom_top_blob) + i;
 
-            softmax(ptr, channels, bottom_top_blob.cstep);
+            softmax(ptr, channels, static_cast<std::int32_t>(bottom_top_blob.cstep));
         }
     }
 
@@ -213,9 +213,9 @@ std::int32_t Softmax<LayerT, MatT, OptionT, ParamDictT>::forward_inplace(MatT& b
         #pragma omp parallel for num_threads(opt.num_threads)
         for (std::int32_t i = 0; i < size; i++)
         {
-            float* ptr = (float*)bottom_top_blob + i;
+            float* ptr = static_cast<float*>(bottom_top_blob) + i;
 
-            softmax(ptr, channels, bottom_top_blob.cstep);
+            softmax(ptr, channels, static_cast<std::int32_t>(bottom_top_blob.cstep));
         }
     }
 

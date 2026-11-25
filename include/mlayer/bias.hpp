@@ -65,7 +65,7 @@ std::int32_t Bias<LayerT, MatT, OptionT, ParamDictT, ModelBinT>::forward_inplace
     {
         float* ptr = bottom_top_blob.channel(q);
 
-        float bias = bias_data[q];
+        float bias = bias_data[static_cast<std::size_t>(q)];
 
         for (std::int32_t i = 0; i < size; i++)
         {
