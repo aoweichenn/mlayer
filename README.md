@@ -52,6 +52,9 @@
 | `Slice` | `include/mlayer/slice.hpp` | 1D–4D 切片，slices/indices 两种模式 |
 | `BinaryOp` | `include/mlayer/binaryop.hpp` | 逐元素二元运算，含标量与广播 |
 | `Permute` | `include/mlayer/permute.hpp` | 1D–4D 维度重排 |
+| `Reshape` | `include/mlayer/reshape.hpp` | 数值参数与简单 shape 表达式 |
+| `MatMul` | `include/mlayer/matmul.hpp` | 1D–4D 矩阵乘，transB |
+| `Interp` | `include/mlayer/interp.hpp` | nearest / bilinear 上采样 |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
