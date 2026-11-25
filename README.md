@@ -50,6 +50,8 @@
 | `Softmax` | `include/mlayer/softmax.hpp` | 1D–4D softmax，正/负 axis |
 | `YoloV5Focus` | `include/mlayer/yolov5focus.hpp` | 可选 examples 自定义层（非 ncnn core） |
 | `Slice` | `include/mlayer/slice.hpp` | 1D–4D 切片，slices/indices 两种模式 |
+| `BinaryOp` | `include/mlayer/binaryop.hpp` | 逐元素二元运算，含标量与广播 |
+| `Permute` | `include/mlayer/permute.hpp` | 1D–4D 维度重排 |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
