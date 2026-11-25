@@ -44,6 +44,16 @@ protected:
 
     static std::int32_t convolution_1x1(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
 
+#if defined(__AVX2__)
+    static __m128 hsum8(__m256 v)
+    {
+        const __m128 lo = _mm256_castps256_ps128(v);
+        const __m128 hi = _mm256_extractf128_ps(v, 1);
+        const __m128 s = _mm_add_ps(lo, hi);
+        return _mm_hadd_ps(_mm_hadd_ps(s, s), _mm_hadd_ps(s, s));
+    }
+#endif
+
     static std::int32_t convolution_im2col(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
 
 public:
@@ -316,46 +326,100 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
     const std::int32_t outch = top_blob.c;
     const std::int32_t size = outw * outh;
 
+    // Block four output channels so every input channel is streamed once per
+    // block instead of once per output channel.
+    constexpr std::int32_t kOutputBlock = 4;
+
     #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t p = 0; p < outch; p++)
+    for (std::int32_t p0 = 0; p0 < outch; p0 += kOutputBlock)
     {
-        float* outptr = top_blob.channel(p);
-        const float bias = bias_data.empty() ? 0.f : bias_data[p];
-        for (std::int32_t i = 0; i < size; i++)
-        {
-            outptr[i] = bias;
-        }
+        const std::int32_t np = outch - p0 < kOutputBlock ? outch - p0 : kOutputBlock;
 
-        const float* kptr = static_cast<const float*>(weight_data) + inch * p;
-        for (std::int32_t q = 0; q < inch; q++)
+        float* outptr[kOutputBlock];
+        const float* wptr[kOutputBlock];
+        float bias[kOutputBlock];
+        for (std::int32_t t = 0; t < np; t++)
         {
-            const float w = kptr[q];
-            const float* sptr = bottom_blob.channel(q);
-
-#if defined(__AVX2__)
-            __m256 wv = _mm256_set1_ps(w);
-            std::int32_t i = 0;
-            for (; i + 8 <= size; i += 8)
-            {
-                __m256 v = _mm256_loadu_ps(sptr + i);
-                __m256 o = _mm256_loadu_ps(outptr + i);
-                _mm256_storeu_ps(outptr + i, _mm256_fmadd_ps(v, wv, o));
-            }
-            for (; i < size; i++)
-            {
-                outptr[i] += sptr[i] * w;
-            }
-#else
+            const std::int32_t p = p0 + t;
+            outptr[t] = top_blob.channel(p);
+            wptr[t] = static_cast<const float*>(weight_data) + inch * p;
+            bias[t] = bias_data.empty() ? 0.f : bias_data[p];
             for (std::int32_t i = 0; i < size; i++)
             {
-                outptr[i] += sptr[i] * w;
+                outptr[t][i] = bias[t];
+            }
+        }
+
+        if (np == kOutputBlock)
+        {
+#if defined(__AVX2__)
+            for (std::int32_t q = 0; q < inch; q++)
+            {
+                const float* sptr = bottom_blob.channel(q);
+                const __m256 wv0 = _mm256_set1_ps(wptr[0][q]);
+                const __m256 wv1 = _mm256_set1_ps(wptr[1][q]);
+                const __m256 wv2 = _mm256_set1_ps(wptr[2][q]);
+                const __m256 wv3 = _mm256_set1_ps(wptr[3][q]);
+                std::int32_t i = 0;
+                for (; i + 8 <= size; i += 8)
+                {
+                    const __m256 v = _mm256_loadu_ps(sptr + i);
+                    _mm256_storeu_ps(outptr[0] + i,
+                                     _mm256_fmadd_ps(v, wv0, _mm256_loadu_ps(outptr[0] + i)));
+                    _mm256_storeu_ps(outptr[1] + i,
+                                     _mm256_fmadd_ps(v, wv1, _mm256_loadu_ps(outptr[1] + i)));
+                    _mm256_storeu_ps(outptr[2] + i,
+                                     _mm256_fmadd_ps(v, wv2, _mm256_loadu_ps(outptr[2] + i)));
+                    _mm256_storeu_ps(outptr[3] + i,
+                                     _mm256_fmadd_ps(v, wv3, _mm256_loadu_ps(outptr[3] + i)));
+                }
+                for (; i < size; i++)
+                {
+                    const float v = sptr[i];
+                    outptr[0][i] += v * wptr[0][q];
+                    outptr[1][i] += v * wptr[1][q];
+                    outptr[2][i] += v * wptr[2][q];
+                    outptr[3][i] += v * wptr[3][q];
+                }
+            }
+#else
+            for (std::int32_t q = 0; q < inch; q++)
+            {
+                const float* sptr = bottom_blob.channel(q);
+                for (std::int32_t i = 0; i < size; i++)
+                {
+                    const float v = sptr[i];
+                    outptr[0][i] += v * wptr[0][q];
+                    outptr[1][i] += v * wptr[1][q];
+                    outptr[2][i] += v * wptr[2][q];
+                    outptr[3][i] += v * wptr[3][q];
+                }
             }
 #endif
         }
-
-        for (std::int32_t i = 0; i < size; i++)
+        else
         {
-            outptr[i] = Activation(outptr[i], activation_type, activation_params);
+            for (std::int32_t t = 0; t < np; t++)
+            {
+                for (std::int32_t q = 0; q < inch; q++)
+                {
+                    const float w = wptr[t][q];
+                    const float* sptr = bottom_blob.channel(q);
+                    float* op = outptr[t];
+                    for (std::int32_t i = 0; i < size; i++)
+                    {
+                        op[i] += sptr[i] * w;
+                    }
+                }
+            }
+        }
+
+        for (std::int32_t t = 0; t < np; t++)
+        {
+            for (std::int32_t i = 0; i < size; i++)
+            {
+                outptr[t][i] = Activation(outptr[t][i], activation_type, activation_params);
+            }
         }
     }
 
@@ -401,105 +465,140 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
         }
     }
 
+    // Block eight output channels: each im2col row is loaded once per block
+    // instead of once per output channel, which is the main memory bottleneck
+    // for 3x3 convolutions.
+    constexpr std::int32_t kOutputBlock = 8;
+
     #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t p0 = 0; p0 < outch; p0 += 4)
+    for (std::int32_t p0 = 0; p0 < outch; p0 += kOutputBlock)
     {
-        const std::int32_t np = outch - p0 < 4 ? outch - p0 : 4;
+        const std::int32_t np = outch - p0 < kOutputBlock ? outch - p0 : kOutputBlock;
 
-        if (np == 4)
+        float* outptr[kOutputBlock];
+        const float* wptr[kOutputBlock];
+        float bias[kOutputBlock];
+        for (std::int32_t t = 0; t < np; t++)
         {
-            const float* wp0 = static_cast<const float*>(weight_data) + (p0 + 0) * K;
-            const float* wp1 = static_cast<const float*>(weight_data) + (p0 + 1) * K;
-            const float* wp2 = static_cast<const float*>(weight_data) + (p0 + 2) * K;
-            const float* wp3 = static_cast<const float*>(weight_data) + (p0 + 3) * K;
-            float* op0 = top_blob.channel(p0 + 0);
-            float* op1 = top_blob.channel(p0 + 1);
-            float* op2 = top_blob.channel(p0 + 2);
-            float* op3 = top_blob.channel(p0 + 3);
-            const float b0 = bias_data.empty() ? 0.f : bias_data[p0 + 0];
-            const float b1 = bias_data.empty() ? 0.f : bias_data[p0 + 1];
-            const float b2 = bias_data.empty() ? 0.f : bias_data[p0 + 2];
-            const float b3 = bias_data.empty() ? 0.f : bias_data[p0 + 3];
+            const std::int32_t p = p0 + t;
+            outptr[t] = top_blob.channel(p);
+            wptr[t] = static_cast<const float*>(weight_data) + p * K;
+            bias[t] = bias_data.empty() ? 0.f : bias_data[p];
+            for (std::int32_t i = 0; i < M; i++)
+            {
+                outptr[t][i] = bias[t];
+            }
+        }
 
+        if (np == kOutputBlock)
+        {
+#if defined(__AVX2__)
             for (std::int32_t m = 0; m < M; m++)
             {
                 const float* cp = col.row(m);
 
-#if defined(__AVX2__)
                 __m256 a0 = _mm256_setzero_ps();
                 __m256 a1 = _mm256_setzero_ps();
                 __m256 a2 = _mm256_setzero_ps();
                 __m256 a3 = _mm256_setzero_ps();
+                __m256 a4 = _mm256_setzero_ps();
+                __m256 a5 = _mm256_setzero_ps();
+                __m256 a6 = _mm256_setzero_ps();
+                __m256 a7 = _mm256_setzero_ps();
                 std::int32_t k = 0;
                 for (; k + 8 <= K; k += 8)
                 {
                     const __m256 c = _mm256_loadu_ps(cp + k);
-                    a0 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wp0 + k), a0);
-                    a1 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wp1 + k), a1);
-                    a2 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wp2 + k), a2);
-                    a3 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wp3 + k), a3);
+                    a0 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wptr[0] + k), a0);
+                    a1 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wptr[1] + k), a1);
+                    a2 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wptr[2] + k), a2);
+                    a3 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wptr[3] + k), a3);
+                    a4 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wptr[4] + k), a4);
+                    a5 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wptr[5] + k), a5);
+                    a6 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wptr[6] + k), a6);
+                    a7 = _mm256_fmadd_ps(c, _mm256_loadu_ps(wptr[7] + k), a7);
                 }
-                __m128 lo0 = _mm256_castps256_ps128(a0), hi0 = _mm256_extractf128_ps(a0, 1);
-                __m128 lo1 = _mm256_castps256_ps128(a1), hi1 = _mm256_extractf128_ps(a1, 1);
-                __m128 lo2 = _mm256_castps256_ps128(a2), hi2 = _mm256_extractf128_ps(a2, 1);
-                __m128 lo3 = _mm256_castps256_ps128(a3), hi3 = _mm256_extractf128_ps(a3, 1);
-                __m128 s0 = _mm_hadd_ps(_mm_hadd_ps(_mm_add_ps(lo0, hi0), _mm_add_ps(lo0, hi0)),
-                                        _mm_hadd_ps(_mm_add_ps(lo0, hi0), _mm_add_ps(lo0, hi0)));
-                __m128 s1 = _mm_hadd_ps(_mm_hadd_ps(_mm_add_ps(lo1, hi1), _mm_add_ps(lo1, hi1)),
-                                        _mm_hadd_ps(_mm_add_ps(lo1, hi1), _mm_add_ps(lo1, hi1)));
-                __m128 s2 = _mm_hadd_ps(_mm_hadd_ps(_mm_add_ps(lo2, hi2), _mm_add_ps(lo2, hi2)),
-                                        _mm_hadd_ps(_mm_add_ps(lo2, hi2), _mm_add_ps(lo2, hi2)));
-                __m128 s3 = _mm_hadd_ps(_mm_hadd_ps(_mm_add_ps(lo3, hi3), _mm_add_ps(lo3, hi3)),
-                                        _mm_hadd_ps(_mm_add_ps(lo3, hi3), _mm_add_ps(lo3, hi3)));
-                float sum0 = b0 + _mm_cvtss_f32(s0);
-                float sum1 = b1 + _mm_cvtss_f32(s1);
-                float sum2 = b2 + _mm_cvtss_f32(s2);
-                float sum3 = b3 + _mm_cvtss_f32(s3);
+
+                float sum0 = bias[0] + _mm_cvtss_f32(hsum8(a0));
+                float sum1 = bias[1] + _mm_cvtss_f32(hsum8(a1));
+                float sum2 = bias[2] + _mm_cvtss_f32(hsum8(a2));
+                float sum3 = bias[3] + _mm_cvtss_f32(hsum8(a3));
+                float sum4 = bias[4] + _mm_cvtss_f32(hsum8(a4));
+                float sum5 = bias[5] + _mm_cvtss_f32(hsum8(a5));
+                float sum6 = bias[6] + _mm_cvtss_f32(hsum8(a6));
+                float sum7 = bias[7] + _mm_cvtss_f32(hsum8(a7));
                 for (; k < K; k++)
                 {
-                    sum0 += cp[k] * wp0[k];
-                    sum1 += cp[k] * wp1[k];
-                    sum2 += cp[k] * wp2[k];
-                    sum3 += cp[k] * wp3[k];
+                    const float c = cp[k];
+                    sum0 += c * wptr[0][k];
+                    sum1 += c * wptr[1][k];
+                    sum2 += c * wptr[2][k];
+                    sum3 += c * wptr[3][k];
+                    sum4 += c * wptr[4][k];
+                    sum5 += c * wptr[5][k];
+                    sum6 += c * wptr[6][k];
+                    sum7 += c * wptr[7][k];
                 }
+
+                outptr[0][m] = Activation(sum0, activation_type, activation_params);
+                outptr[1][m] = Activation(sum1, activation_type, activation_params);
+                outptr[2][m] = Activation(sum2, activation_type, activation_params);
+                outptr[3][m] = Activation(sum3, activation_type, activation_params);
+                outptr[4][m] = Activation(sum4, activation_type, activation_params);
+                outptr[5][m] = Activation(sum5, activation_type, activation_params);
+                outptr[6][m] = Activation(sum6, activation_type, activation_params);
+                outptr[7][m] = Activation(sum7, activation_type, activation_params);
+            }
 #else
-                float sum0 = b0;
-                float sum1 = b1;
-                float sum2 = b2;
-                float sum3 = b3;
+            for (std::int32_t m = 0; m < M; m++)
+            {
+                const float* cp = col.row(m);
+                float sum0 = 0.f;
+                float sum1 = 0.f;
+                float sum2 = 0.f;
+                float sum3 = 0.f;
+                float sum4 = 0.f;
+                float sum5 = 0.f;
+                float sum6 = 0.f;
+                float sum7 = 0.f;
                 for (std::int32_t k = 0; k < K; k++)
                 {
                     const float c = cp[k];
-                    sum0 += c * wp0[k];
-                    sum1 += c * wp1[k];
-                    sum2 += c * wp2[k];
-                    sum3 += c * wp3[k];
+                    sum0 += c * wptr[0][k];
+                    sum1 += c * wptr[1][k];
+                    sum2 += c * wptr[2][k];
+                    sum3 += c * wptr[3][k];
+                    sum4 += c * wptr[4][k];
+                    sum5 += c * wptr[5][k];
+                    sum6 += c * wptr[6][k];
+                    sum7 += c * wptr[7][k];
                 }
-#endif
-                op0[m] = Activation(sum0, activation_type, activation_params);
-                op1[m] = Activation(sum1, activation_type, activation_params);
-                op2[m] = Activation(sum2, activation_type, activation_params);
-                op3[m] = Activation(sum3, activation_type, activation_params);
+                outptr[0][m] = Activation(sum0, activation_type, activation_params);
+                outptr[1][m] = Activation(sum1, activation_type, activation_params);
+                outptr[2][m] = Activation(sum2, activation_type, activation_params);
+                outptr[3][m] = Activation(sum3, activation_type, activation_params);
+                outptr[4][m] = Activation(sum4, activation_type, activation_params);
+                outptr[5][m] = Activation(sum5, activation_type, activation_params);
+                outptr[6][m] = Activation(sum6, activation_type, activation_params);
+                outptr[7][m] = Activation(sum7, activation_type, activation_params);
             }
+#endif
         }
         else
         {
             for (std::int32_t t = 0; t < np; t++)
             {
-                const std::int32_t p = p0 + t;
-                const float* wp = static_cast<const float*>(weight_data) + p * K;
-                const float bias = bias_data.empty() ? 0.f : bias_data[p];
-                float* outptr = top_blob.channel(p);
-
+                const float* wp = wptr[t];
+                float* op = outptr[t];
                 for (std::int32_t m = 0; m < M; m++)
                 {
                     const float* cp = col.row(m);
-                    float sum = bias;
+                    float sum = bias[t];
                     for (std::int32_t k = 0; k < K; k++)
                     {
                         sum += cp[k] * wp[k];
                     }
-                    outptr[m] = Activation(sum, activation_type, activation_params);
+                    op[m] = Activation(sum, activation_type, activation_params);
                 }
             }
         }
