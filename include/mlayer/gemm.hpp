@@ -520,18 +520,21 @@ private:
                 std::int32_t kk = 0;
                 if (bits == 8) {
 #if defined(__AVX2__)
-                    // Integer dot product, 16 lanes at a time. Integer addition
-                    // is associative, so the result is bit-identical to the
-                    // scalar accumulation used before.
+                    // Integer dot product, 32 lanes at a time via u8*s8
+                    // (abs/sign trick). Integer addition is associative, so the
+                    // result is bit-identical to scalar accumulation.
+                    const __m256i ones = _mm256_set1_epi16(1);
                     __m256i acc = _mm256_setzero_si256();
-                    for (; kk + 16 <= max_kk; kk += 16) {
-                        const __m128i a8 =
-                            _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptrA + k0 + kk));
-                        const __m128i b8 =
-                            _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptrB + k0 + kk));
-                        const __m256i a16 = _mm256_cvtepi8_epi16(a8);
-                        const __m256i b16 = _mm256_cvtepi8_epi16(b8);
-                        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(a16, b16));
+                    for (; kk + 32 <= max_kk; kk += 32) {
+                        _mm_prefetch(reinterpret_cast<const char*>(ptrB + k0 + kk + 256), _MM_HINT_T0);
+                        const __m256i a8 =
+                            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptrA + k0 + kk));
+                        const __m256i b8 =
+                            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptrB + k0 + kk));
+                        const __m256i a_abs = _mm256_abs_epi8(a8);
+                        const __m256i b_signed = _mm256_sign_epi8(b8, a8);
+                        const __m256i pairs = _mm256_maddubs_epi16(a_abs, b_signed);
+                        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(pairs, ones));
                     }
                     __m128i sum128 =
                         _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
