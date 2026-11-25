@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace mlayer {
@@ -69,7 +70,10 @@ public:
 
     std::int32_t forward(const std::vector<MatT>& bottom_blobs, std::vector<MatT>& top_blobs,
                          const OptionT& opt) const override {
-        if (this->kv_cache != 0 || this->quantize_term != 0) {
+        if (this->quantize_term != 0 || top_blobs.empty()) {
+            return -1;
+        }
+        if (this->kv_cache != 0 && top_blobs.size() < 3) {
             return -1;
         }
 
@@ -77,16 +81,58 @@ public:
         std::int32_t k_blob_i = 0;
         std::int32_t v_blob_i = 0;
         std::int32_t attn_mask_i = 0;
-        if (this->attn_mask != 0) {
+        std::int32_t past_k_i = 0;
+        std::int32_t past_v_i = 0;
+        if (this->kv_cache != 0) {
+            if (this->attn_mask != 0) {
+                if (bottom_blobs.size() == 4) {
+                    q_blob_i = k_blob_i = v_blob_i = 0;
+                    attn_mask_i = 1;
+                    past_k_i = 2;
+                    past_v_i = 3;
+                } else if (bottom_blobs.size() == 5) {
+                    q_blob_i = 0;
+                    k_blob_i = v_blob_i = 1;
+                    attn_mask_i = 2;
+                    past_k_i = 3;
+                    past_v_i = 4;
+                } else if (bottom_blobs.size() == 6) {
+                    q_blob_i = 0;
+                    k_blob_i = 1;
+                    v_blob_i = 2;
+                    attn_mask_i = 3;
+                    past_k_i = 4;
+                    past_v_i = 5;
+                } else {
+                    return -1;
+                }
+            } else {
+                if (bottom_blobs.size() == 3) {
+                    q_blob_i = k_blob_i = v_blob_i = 0;
+                    past_k_i = 1;
+                    past_v_i = 2;
+                } else if (bottom_blobs.size() == 4) {
+                    q_blob_i = 0;
+                    k_blob_i = v_blob_i = 1;
+                    past_k_i = 2;
+                    past_v_i = 3;
+                } else if (bottom_blobs.size() == 5) {
+                    q_blob_i = 0;
+                    k_blob_i = 1;
+                    v_blob_i = 2;
+                    past_k_i = 3;
+                    past_v_i = 4;
+                } else {
+                    return -1;
+                }
+            }
+        } else if (this->attn_mask != 0) {
             if (bottom_blobs.size() == 2) {
-                q_blob_i = 0;
-                k_blob_i = 0;
-                v_blob_i = 0;
+                q_blob_i = k_blob_i = v_blob_i = 0;
                 attn_mask_i = 1;
             } else if (bottom_blobs.size() == 3) {
                 q_blob_i = 0;
-                k_blob_i = 1;
-                v_blob_i = 1;
+                k_blob_i = v_blob_i = 1;
                 attn_mask_i = 2;
             } else if (bottom_blobs.size() == 4) {
                 q_blob_i = 0;
@@ -98,13 +144,10 @@ public:
             }
         } else {
             if (bottom_blobs.size() == 1) {
-                q_blob_i = 0;
-                k_blob_i = 0;
-                v_blob_i = 0;
+                q_blob_i = k_blob_i = v_blob_i = 0;
             } else if (bottom_blobs.size() == 2) {
                 q_blob_i = 0;
-                k_blob_i = 1;
-                v_blob_i = 1;
+                k_blob_i = v_blob_i = 1;
             } else if (bottom_blobs.size() == 3) {
                 q_blob_i = 0;
                 k_blob_i = 1;
@@ -117,10 +160,16 @@ public:
         const MatT& q_blob = bottom_blobs[static_cast<std::size_t>(q_blob_i)];
         const MatT& k_blob = bottom_blobs[static_cast<std::size_t>(k_blob_i)];
         const MatT& v_blob = bottom_blobs[static_cast<std::size_t>(v_blob_i)];
+        const MatT& past_k = this->kv_cache != 0 ? bottom_blobs[static_cast<std::size_t>(past_k_i)] : MatT();
+        const MatT& past_v = this->kv_cache != 0 ? bottom_blobs[static_cast<std::size_t>(past_v_i)] : MatT();
 
         const std::int32_t src_seqlen = q_blob.h;
         const std::int32_t cur_seqlen = k_blob.h;
-        const std::int32_t dst_seqlen = cur_seqlen;
+        const std::int32_t past_seqlen = !past_k.empty() ? past_k.h : 0;
+        const std::int32_t dst_seqlen = past_seqlen > 0
+                                            ? (q_blob_i == k_blob_i ? past_seqlen + cur_seqlen : past_seqlen)
+                                            : cur_seqlen;
+        const bool append_kv = past_seqlen == 0 || q_blob_i == k_blob_i;
         const std::int32_t embed_dim_per_head = this->embed_dim / this->num_heads;
         const std::int32_t qdim = this->weight_data_size / this->embed_dim;
 
@@ -143,34 +192,67 @@ public:
         }
 
         MatT k_affine;
-        k_affine.create(cur_seqlen, this->embed_dim, 4u, opt.workspace_allocator);
         MatT v_affine;
-        v_affine.create(cur_seqlen, this->embed_dim, 4u, opt.workspace_allocator);
-        if (k_affine.empty() || v_affine.empty()) {
-            return -100;
-        }
-        #pragma omp parallel for num_threads(opt.num_threads)
-        for (std::int32_t i = 0; i < cur_seqlen; ++i) {
-            const float* kptr = static_cast<const float*>(this->k_weight_data);
-            for (std::int32_t j = 0; j < this->embed_dim; ++j) {
-                const float* ptr = k_blob.row(i);
-                float sum = this->k_bias_data[j];
-                for (std::int32_t k = 0; k < this->kdim; ++k) {
-                    sum += *ptr++ * *kptr++;
+        if (append_kv) {
+            k_affine.create(cur_seqlen, this->embed_dim, 4u, opt.workspace_allocator);
+            v_affine.create(cur_seqlen, this->embed_dim, 4u, opt.workspace_allocator);
+            if (k_affine.empty() || v_affine.empty()) {
+                return -100;
+            }
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (std::int32_t i = 0; i < cur_seqlen; ++i) {
+                const float* kptr = static_cast<const float*>(this->k_weight_data);
+                for (std::int32_t j = 0; j < this->embed_dim; ++j) {
+                    const float* ptr = k_blob.row(i);
+                    float sum = this->k_bias_data[j];
+                    for (std::int32_t k = 0; k < this->kdim; ++k) {
+                        sum += *ptr++ * *kptr++;
+                    }
+                    k_affine.row(j)[i] = sum;
                 }
-                k_affine.row(j)[i] = sum;
+            }
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (std::int32_t i = 0; i < cur_seqlen; ++i) {
+                const float* kptr = static_cast<const float*>(this->v_weight_data);
+                for (std::int32_t j = 0; j < this->embed_dim; ++j) {
+                    const float* ptr = v_blob.row(i);
+                    float sum = this->v_bias_data[j];
+                    for (std::int32_t k = 0; k < this->vdim; ++k) {
+                        sum += *ptr++ * *kptr++;
+                    }
+                    v_affine.row(j)[i] = sum;
+                }
             }
         }
-        #pragma omp parallel for num_threads(opt.num_threads)
-        for (std::int32_t i = 0; i < cur_seqlen; ++i) {
-            const float* kptr = static_cast<const float*>(this->v_weight_data);
-            for (std::int32_t j = 0; j < this->embed_dim; ++j) {
-                const float* ptr = v_blob.row(i);
-                float sum = this->v_bias_data[j];
-                for (std::int32_t k = 0; k < this->vdim; ++k) {
-                    sum += *ptr++ * *kptr++;
+
+        MatT empty_cache;
+        MatT& cached_k = this->kv_cache != 0 ? top_blobs[1] : empty_cache;
+        MatT& cached_v = this->kv_cache != 0 ? top_blobs[2] : empty_cache;
+        if (this->kv_cache != 0) {
+            cached_k.create(embed_dim_per_head, dst_seqlen, this->num_heads, 4u, opt.blob_allocator);
+            cached_v.create(embed_dim_per_head, dst_seqlen, this->num_heads, 4u, opt.blob_allocator);
+            if (cached_k.empty() || cached_v.empty()) {
+                return -100;
+            }
+            for (std::int32_t q = 0; q < this->num_heads; ++q) {
+                if (past_seqlen > 0) {
+                    for (std::int32_t y = 0; y < past_seqlen; ++y) {
+                        std::memcpy(cached_k.channel(q).row(y), past_k.channel(q).row(y),
+                                    static_cast<std::size_t>(embed_dim_per_head) * sizeof(float));
+                        std::memcpy(cached_v.channel(q).row(y), past_v.channel(q).row(y),
+                                    static_cast<std::size_t>(embed_dim_per_head) * sizeof(float));
+                    }
                 }
-                v_affine.row(j)[i] = sum;
+                if (append_kv) {
+                    for (std::int32_t s = 0; s < cur_seqlen; ++s) {
+                        float* kptr = cached_k.channel(q).row(past_seqlen + s);
+                        float* vptr = cached_v.channel(q).row(past_seqlen + s);
+                        for (std::int32_t d = 0; d < embed_dim_per_head; ++d) {
+                            kptr[d] = k_affine.row(q * embed_dim_per_head + d)[s];
+                            vptr[d] = v_affine.row(q * embed_dim_per_head + d)[s];
+                        }
+                    }
+                }
             }
         }
 
@@ -182,14 +264,22 @@ public:
         #pragma omp parallel for num_threads(opt.num_threads)
         for (std::int32_t q = 0; q < this->num_heads; ++q) {
             const MatT q_affine_head = q_affine.row_range(q * embed_dim_per_head, embed_dim_per_head);
-            const MatT k_affine_head = k_affine.row_range(q * embed_dim_per_head, embed_dim_per_head);
             MatT qk_cross_head = qk_cross.channel(q);
             for (std::int32_t i = 0; i < src_seqlen; ++i) {
                 float* outptr = qk_cross_head.row(i);
                 for (std::int32_t j = 0; j < dst_seqlen; ++j) {
                     float sum = 0.0F;
-                    for (std::int32_t l = 0; l < embed_dim_per_head; ++l) {
-                        sum += q_affine_head.row(l)[i] * k_affine_head.row(l)[j];
+                    if (this->kv_cache != 0) {
+                        const MatT k_head = cached_k.channel(q);
+                        for (std::int32_t l = 0; l < embed_dim_per_head; ++l) {
+                            sum += q_affine_head.row(l)[i] * k_head.row(j)[l];
+                        }
+                    } else {
+                        const MatT k_affine_head =
+                            k_affine.row_range(q * embed_dim_per_head, embed_dim_per_head);
+                        for (std::int32_t l = 0; l < embed_dim_per_head; ++l) {
+                            sum += q_affine_head.row(l)[i] * k_affine_head.row(l)[j];
+                        }
                     }
                     outptr[j] = sum;
                 }
@@ -241,14 +331,22 @@ public:
         #pragma omp parallel for num_threads(opt.num_threads)
         for (std::int32_t q = 0; q < this->num_heads; ++q) {
             const MatT qk_cross_head = qk_cross.channel(q);
-            const MatT v_affine_head = v_affine.row_range(q * embed_dim_per_head, embed_dim_per_head);
             MatT qkv_cross_head = qkv_cross.row_range(q * embed_dim_per_head, embed_dim_per_head);
+            const MatT v_affine_head =
+                this->kv_cache != 0 ? cached_v.channel(q)
+                                    : v_affine.row_range(q * embed_dim_per_head, embed_dim_per_head);
             for (std::int32_t i = 0; i < src_seqlen; ++i) {
                 for (std::int32_t j = 0; j < embed_dim_per_head; ++j) {
                     const float* qkptr = qk_cross_head.row(i);
                     float sum = 0.0F;
-                    for (std::int32_t k = 0; k < dst_seqlen; ++k) {
-                        sum += *qkptr++ * v_affine_head.row(j)[k];
+                    if (this->kv_cache != 0) {
+                        for (std::int32_t k = 0; k < dst_seqlen; ++k) {
+                            sum += *qkptr++ * v_affine_head.row(k)[j];
+                        }
+                    } else {
+                        for (std::int32_t k = 0; k < dst_seqlen; ++k) {
+                            sum += *qkptr++ * v_affine_head.row(j)[k];
+                        }
                     }
                     qkv_cross_head.row(j)[i] = sum;
                 }

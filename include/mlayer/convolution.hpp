@@ -833,14 +833,14 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
             for (std::int32_t m = 0; m < M; m++)
             {
                 const float* cp = col.row(m);
-                float sum0 = 0.f;
-                float sum1 = 0.f;
-                float sum2 = 0.f;
-                float sum3 = 0.f;
-                float sum4 = 0.f;
-                float sum5 = 0.f;
-                float sum6 = 0.f;
-                float sum7 = 0.f;
+                float sum0 = bias[0];
+                float sum1 = bias[1];
+                float sum2 = bias[2];
+                float sum3 = bias[3];
+                float sum4 = bias[4];
+                float sum5 = bias[5];
+                float sum6 = bias[6];
+                float sum7 = bias[7];
                 for (std::int32_t k = 0; k < K; k++)
                 {
                     const float c = cp[k];
@@ -942,7 +942,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
 
     const std::size_t im2col_bytes = static_cast<std::size_t>(kernel_w) * kernel_h * bottom_blob_bordered.c *
                                      top_blob.w * top_blob.h * sizeof(float);
-    if (kernel_w * kernel_h * bottom_blob_bordered.c >= 64 && im2col_bytes <= 512ull * 1024ull * 1024ull)
+    if (kernel_w * kernel_h * bottom_blob_bordered.c >= 16 && im2col_bytes <= 512ull * 1024ull * 1024ull)
     {
         return convolution_im2col(bottom_blob_bordered, top_blob, weight_data, bias_data, kernel_w, kernel_h, stride_w, stride_h, dilation_w, dilation_h, activation_type, activation_params, opt);
     }
