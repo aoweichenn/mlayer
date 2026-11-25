@@ -339,9 +339,20 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
     // block instead of once per output channel.
     constexpr std::int32_t kOutputBlock = 4;
 
+    // Split the spatial range too when there are fewer output blocks than
+    // threads, otherwise small-output-channel layers only use 2-4 cores.
+    const std::int32_t pblocks = (outch + kOutputBlock - 1) / kOutputBlock;
+    const std::int32_t m_split = std::max(1, opt.num_threads / pblocks);
+    const std::int32_t tasks = pblocks * m_split;
+
     #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t p0 = 0; p0 < outch; p0 += kOutputBlock)
+    for (std::int32_t task = 0; task < tasks; task++)
     {
+        const std::int32_t pb = task / m_split;
+        const std::int32_t mi = task % m_split;
+        const std::int32_t i_begin = size * mi / m_split;
+        const std::int32_t i_end = size * (mi + 1) / m_split;
+        const std::int32_t p0 = pb * kOutputBlock;
         const std::int32_t np = outch - p0 < kOutputBlock ? outch - p0 : kOutputBlock;
 
         float* outptr[kOutputBlock];
@@ -353,7 +364,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
             outptr[t] = top_blob.channel(p);
             wptr[t] = static_cast<const float*>(weight_data) + inch * p;
             bias[t] = bias_data.empty() ? 0.f : bias_data[p];
-            for (std::int32_t i = 0; i < size; i++)
+            for (std::int32_t i = i_begin; i < i_end; i++)
             {
                 outptr[t][i] = bias[t];
             }
@@ -369,8 +380,8 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                 const __m256 wv1 = _mm256_set1_ps(wptr[1][q]);
                 const __m256 wv2 = _mm256_set1_ps(wptr[2][q]);
                 const __m256 wv3 = _mm256_set1_ps(wptr[3][q]);
-                std::int32_t i = 0;
-                for (; i + 8 <= size; i += 8)
+                std::int32_t i = i_begin;
+                for (; i + 8 <= i_end; i += 8)
                 {
                     const __m256 v = _mm256_loadu_ps(sptr + i);
                     _mm256_storeu_ps(outptr[0] + i,
@@ -382,7 +393,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                     _mm256_storeu_ps(outptr[3] + i,
                                      _mm256_fmadd_ps(v, wv3, _mm256_loadu_ps(outptr[3] + i)));
                 }
-                for (; i < size; i++)
+                for (; i < i_end; i++)
                 {
                     const float v = sptr[i];
                     outptr[0][i] += v * wptr[0][q];
@@ -395,7 +406,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
             for (std::int32_t q = 0; q < inch; q++)
             {
                 const float* sptr = bottom_blob.channel(q);
-                for (std::int32_t i = 0; i < size; i++)
+                for (std::int32_t i = i_begin; i < i_end; i++)
                 {
                     const float v = sptr[i];
                     outptr[0][i] += v * wptr[0][q];
@@ -415,7 +426,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                     const float w = wptr[t][q];
                     const float* sptr = bottom_blob.channel(q);
                     float* op = outptr[t];
-                    for (std::int32_t i = 0; i < size; i++)
+                    for (std::int32_t i = i_begin; i < i_end; i++)
                     {
                         op[i] += sptr[i] * w;
                     }
@@ -425,7 +436,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
 
         for (std::int32_t t = 0; t < np; t++)
         {
-            for (std::int32_t i = 0; i < size; i++)
+            for (std::int32_t i = i_begin; i < i_end; i++)
             {
                 outptr[t][i] = fused_activation(outptr[t][i], activation_type, activation_params);
             }
@@ -1070,9 +1081,18 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
     // for 3x3 convolutions.
     constexpr std::int32_t kOutputBlock = 8;
 
+    const std::int32_t pblocks = (outch + kOutputBlock - 1) / kOutputBlock;
+    const std::int32_t m_split = std::max(1, opt.num_threads / pblocks);
+    const std::int32_t tasks = pblocks * m_split;
+
     #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t p0 = 0; p0 < outch; p0 += kOutputBlock)
+    for (std::int32_t task = 0; task < tasks; task++)
     {
+        const std::int32_t pb = task / m_split;
+        const std::int32_t mi = task % m_split;
+        const std::int32_t m_begin = M * mi / m_split;
+        const std::int32_t m_end = M * (mi + 1) / m_split;
+        const std::int32_t p0 = pb * kOutputBlock;
         const std::int32_t np = outch - p0 < kOutputBlock ? outch - p0 : kOutputBlock;
 
         float* outptr[kOutputBlock];
@@ -1084,7 +1104,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
             outptr[t] = top_blob.channel(p);
             wptr[t] = static_cast<const float*>(weight_data) + p * K;
             bias[t] = bias_data.empty() ? 0.f : bias_data[p];
-            for (std::int32_t i = 0; i < M; i++)
+            for (std::int32_t i = m_begin; i < m_end; i++)
             {
                 outptr[t][i] = bias[t];
             }
@@ -1093,7 +1113,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
         if (np == kOutputBlock)
         {
 #if defined(__AVX2__)
-            for (std::int32_t m = 0; m < M; m++)
+            for (std::int32_t m = m_begin; m < m_end; m++)
             {
                 const float* cp = col.row(m);
 
@@ -1190,7 +1210,7 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
             {
                 const float* wp = wptr[t];
                 float* op = outptr[t];
-                for (std::int32_t m = 0; m < M; m++)
+                for (std::int32_t m = m_begin; m < m_end; m++)
                 {
                     const float* cp = col.row(m);
                     float sum = bias[t];
