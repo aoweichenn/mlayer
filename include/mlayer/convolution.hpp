@@ -529,20 +529,26 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
         }
     }
 
-    // Input transform for every tile.
-    MatT V(static_cast<std::int32_t>(static_cast<std::size_t>(num_tiles) * 16u * static_cast<std::size_t>(inch)),
-           4u, opt.workspace_allocator);
-    if (V.empty())
-    {
-        return -100;
-    }
-    float* vp = V;
+    // Tile-blocked: each V tile is computed once and reused for every output
+    // channel block while it is still resident in L1.
+    const std::int32_t chunk_tiles = std::max(1, 1024 / inch);
+    const std::int32_t num_chunks = (num_tiles + chunk_tiles - 1) / chunk_tiles;
+
     #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t tile = 0; tile < num_tiles; tile++)
+    for (std::int32_t chunk = 0; chunk < num_chunks; chunk++)
     {
+        const std::int32_t tile_begin = chunk * chunk_tiles;
+        const std::int32_t tile_end = std::min(num_tiles, tile_begin + chunk_tiles);
+        const std::int32_t chunk_count = tile_end - tile_begin;
+
+        std::vector<float> vbuf(static_cast<std::size_t>(chunk_count) * 16 * inch);
+
+        for (std::int32_t lt = 0; lt < chunk_count; lt++)
+        {
+            const std::int32_t tile = tile_begin + lt;
         const std::int32_t ty = tile / tiles_x;
         const std::int32_t tx = tile % tiles_x;
-        float* vtile = vp + static_cast<std::size_t>(tile) * 16 * inch;
+        float* vtile = vbuf.data() + static_cast<std::size_t>(lt) * 16 * inch;
 
         for (std::int32_t q = 0; q < inch; q++)
         {
@@ -570,20 +576,19 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                 vtile[static_cast<std::size_t>((i * 4 + 3) * inch + q)] = r[1] - r[3];
             }
         }
-    }
-
-    #pragma omp parallel for num_threads(opt.num_threads)
-    for (std::int32_t pb = 0; pb < pblocks; pb++)
-    {
-        const std::int32_t p0 = pb * kChannelBlock;
-        const std::int32_t np = outch - p0 < kChannelBlock ? outch - p0 : kChannelBlock;
-        const float* upb = up + static_cast<std::size_t>(pb) * 16 * inch * kChannelBlock;
+        }
 
         float mbuf[16 * kChannelBlock];
-        for (std::int32_t tile = 0; tile < num_tiles; tile++)
+        for (std::int32_t pb = 0; pb < pblocks; pb++)
         {
-            const float* vtile = vp + static_cast<std::size_t>(tile) * 16 * inch;
+            const std::int32_t p0 = pb * kChannelBlock;
+            const std::int32_t np = outch - p0 < kChannelBlock ? outch - p0 : kChannelBlock;
+            const float* upb = up + static_cast<std::size_t>(pb) * 16 * inch * kChannelBlock;
 
+            for (std::int32_t lt = 0; lt < chunk_count; lt++)
+            {
+                const std::int32_t tile = tile_begin + lt;
+                const float* vtile = vbuf.data() + static_cast<std::size_t>(lt) * 16 * inch;
             for (std::int32_t pos = 0; pos < 16; pos++)
             {
                 const float* vrow = vtile + static_cast<std::size_t>(pos) * inch;
@@ -627,25 +632,21 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
             {
                 for (std::int32_t g = 0; g < kChannelBlock; g += 8)
                 {
-                    __m256 r0[4];
-                    __m256 r1[4];
-                    for (std::int32_t i = 0; i < 4; i++)
+                    __m256 t0[4];
+                    __m256 t1[4];
+                    for (std::int32_t j = 0; j < 4; j++)
                     {
-                        const __m256 m0 = _mm256_loadu_ps(mbuf + (i * 4 + 0) * kChannelBlock + g);
-                        const __m256 m1 = _mm256_loadu_ps(mbuf + (i * 4 + 1) * kChannelBlock + g);
-                        const __m256 m2 = _mm256_loadu_ps(mbuf + (i * 4 + 2) * kChannelBlock + g);
-                        const __m256 m3 = _mm256_loadu_ps(mbuf + (i * 4 + 3) * kChannelBlock + g);
-                        r0[i] = _mm256_add_ps(_mm256_add_ps(m0, m1), m2);
-                        r1[i] = _mm256_sub_ps(_mm256_sub_ps(m1, m2), m3);
+                        const __m256 m0 = _mm256_loadu_ps(mbuf + (0 * 4 + j) * kChannelBlock + g);
+                        const __m256 m1 = _mm256_loadu_ps(mbuf + (1 * 4 + j) * kChannelBlock + g);
+                        const __m256 m2 = _mm256_loadu_ps(mbuf + (2 * 4 + j) * kChannelBlock + g);
+                        const __m256 m3 = _mm256_loadu_ps(mbuf + (3 * 4 + j) * kChannelBlock + g);
+                        t0[j] = _mm256_add_ps(_mm256_add_ps(m0, m1), m2);
+                        t1[j] = _mm256_sub_ps(_mm256_sub_ps(m1, m2), m3);
                     }
-                    for (std::int32_t row = 0; row < 2; row++)
-                    {
-                        const __m256* rr = row == 0 ? r0 : r1;
-                        _mm256_storeu_ps(yv[row * 2 + 0] + g,
-                                         _mm256_add_ps(_mm256_add_ps(rr[0], rr[1]), rr[2]));
-                        _mm256_storeu_ps(yv[row * 2 + 1] + g,
-                                         _mm256_sub_ps(_mm256_sub_ps(rr[1], rr[2]), rr[3]));
-                    }
+                    _mm256_storeu_ps(yv[0] + g, _mm256_add_ps(_mm256_add_ps(t0[0], t0[1]), t0[2]));
+                    _mm256_storeu_ps(yv[1] + g, _mm256_sub_ps(_mm256_sub_ps(t0[1], t0[2]), t0[3]));
+                    _mm256_storeu_ps(yv[2] + g, _mm256_add_ps(_mm256_add_ps(t1[0], t1[1]), t1[2]));
+                    _mm256_storeu_ps(yv[3] + g, _mm256_sub_ps(_mm256_sub_ps(t1[1], t1[2]), t1[3]));
                 }
             }
             else
@@ -653,20 +654,20 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
             {
                 for (std::int32_t p = 0; p < np; p++)
                 {
-                    float r0[4], r1[4];
-                    for (std::int32_t i = 0; i < 4; i++)
+                    float t0[4], t1[4];
+                    for (std::int32_t j = 0; j < 4; j++)
                     {
-                        r0[i] = mbuf[(i * 4 + 0) * kChannelBlock + p] +
-                                mbuf[(i * 4 + 1) * kChannelBlock + p] +
-                                mbuf[(i * 4 + 2) * kChannelBlock + p];
-                        r1[i] = mbuf[(i * 4 + 1) * kChannelBlock + p] -
-                                mbuf[(i * 4 + 2) * kChannelBlock + p] -
-                                mbuf[(i * 4 + 3) * kChannelBlock + p];
+                        t0[j] = mbuf[(0 * 4 + j) * kChannelBlock + p] +
+                                mbuf[(1 * 4 + j) * kChannelBlock + p] +
+                                mbuf[(2 * 4 + j) * kChannelBlock + p];
+                        t1[j] = mbuf[(1 * 4 + j) * kChannelBlock + p] -
+                                mbuf[(2 * 4 + j) * kChannelBlock + p] -
+                                mbuf[(3 * 4 + j) * kChannelBlock + p];
                     }
-                    yv[0][p] = r0[0] + r0[1] + r0[2];
-                    yv[1][p] = r0[1] - r0[2] - r0[3];
-                    yv[2][p] = r1[0] + r1[1] + r1[2];
-                    yv[3][p] = r1[1] - r1[2] - r1[3];
+                    yv[0][p] = t0[0] + t0[1] + t0[2];
+                    yv[1][p] = t0[1] - t0[2] - t0[3];
+                    yv[2][p] = t1[0] + t1[1] + t1[2];
+                    yv[3][p] = t1[1] - t1[2] - t1[3];
                 }
             }
 
@@ -692,8 +693,10 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                     op[(oy + 1) * outw + ox + 1] = Activation(yv[3][t] + bias, activation_type, activation_params);
                 }
             }
+            }
         }
     }
+
 
     return 0;
 }
