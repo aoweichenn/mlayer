@@ -411,7 +411,12 @@ private:
             }
         };
 
-        if (bits != 8) {
+        bool fast_int4 = false;
+        if constexpr (requires { opt.use_fast_int4_gemm; }) {
+            fast_int4 = opt.use_fast_int4_gemm;
+        }
+
+        if (bits != 8 && !(bits == 4 && fast_int4)) {
             // ncnn dequantizes 4/6-bit weights to fp32 and multiplies them with
             // the fp32 activation (no activation quantization on this path).
 #pragma omp parallel for num_threads(opt.num_threads)
@@ -510,16 +515,17 @@ private:
             }
         }
 
+        if (bits == 8) {
 #pragma omp parallel for num_threads(opt.num_threads)
-        for (std::int32_t work = 0; work < mt_count * N; ++work) {
-            const std::int32_t t = work / N;
-            const std::int32_t j = work % N;
-            const std::int32_t i0 = t * kMTile;
-            const std::int32_t mi = std::min(kMTile, M - i0);
+            for (std::int32_t work = 0; work < mt_count * N; ++work) {
+                const std::int32_t t = work / N;
+                const std::int32_t j = work % N;
+                const std::int32_t i0 = t * kMTile;
+                const std::int32_t mi = std::min(kMTile, M - i0);
 
-            float sums[kMTile];
-            const std::int8_t* arows[kMTile];
-            const float* adescs[kMTile];
+                float sums[kMTile];
+                const std::int8_t* arows[kMTile];
+                const float* adescs[kMTile];
             for (std::int32_t ii = 0; ii < mi; ++ii) {
                 sums[ii] = init_sum(i0 + ii, j);
                 arows[ii] = A_int8.template row<const std::int8_t>(i0 + ii);
@@ -574,6 +580,92 @@ private:
             }
             for (std::int32_t ii = 0; ii < mi; ++ii) {
                 store_value(i0 + ii, j, sums[ii] * alpha);
+            }
+        }
+        } else {
+            // bits == 4 with opt-in fast kernel: int8 activation quantization
+            // plus on-the-fly 4-bit unpack (intentional divergence from ncnn's
+            // fp32-activation int4 reference path).
+#pragma omp parallel for num_threads(opt.num_threads)
+            for (std::int32_t work = 0; work < mt_count * N; ++work) {
+                const std::int32_t t = work / N;
+                const std::int32_t j = work % N;
+                const std::int32_t i0 = t * kMTile;
+                const std::int32_t mi = std::min(kMTile, M - i0);
+
+                float sums[kMTile];
+                const std::int8_t* arows[kMTile];
+                const float* adescs[kMTile];
+                for (std::int32_t ii = 0; ii < mi; ++ii) {
+                    sums[ii] = init_sum(i0 + ii, j);
+                    arows[ii] = A_int8.template row<const std::int8_t>(i0 + ii);
+                    adescs[ii] = A_descales.row(i0 + ii);
+                }
+
+                const auto* packed_b = BT.template row<const unsigned char>(j);
+                const float* b_scale_ptr = BT_scales.row(j);
+
+                for (std::int32_t g = 0; g < block_count; ++g) {
+                    const std::int32_t k0 = g * block_size;
+                    const std::int32_t max_kk = block_size < K - k0 ? block_size : K - k0;
+                    std::int32_t sums_int32[kMTile] = {0};
+                    std::int32_t kk = 0;
+#if defined(__AVX2__)
+                    const __m256i ones = _mm256_set1_epi16(1);
+                    const __m256i v8 = _mm256_set1_epi8(8);
+                    const __m256i v0f = _mm256_set1_epi8(0x0F);
+                    __m256i accv[kMTile];
+                    for (std::int32_t ii = 0; ii < mi; ++ii) {
+                        accv[ii] = _mm256_setzero_si256();
+                    }
+                    for (; kk + 64 <= max_kk; kk += 64) {
+                        _mm_prefetch(reinterpret_cast<const char*>(packed_b + (k0 + kk) / 2 + 128),
+                                     _MM_HINT_T0);
+                        const __m256i p = _mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(packed_b + (k0 + kk) / 2));
+                        const __m256i lo = _mm256_and_si256(p, v0f);
+                        const __m256i hi = _mm256_and_si256(_mm256_srli_epi16(p, 4), v0f);
+                        const __m256i lo_s = _mm256_sub_epi8(_mm256_xor_si256(lo, v8), v8);
+                        const __m256i hi_s = _mm256_sub_epi8(_mm256_xor_si256(hi, v8), v8);
+                        const __m256i b_lo = _mm256_unpacklo_epi8(lo_s, hi_s);
+                        const __m256i b_hi = _mm256_unpackhi_epi8(lo_s, hi_s);
+                        for (std::int32_t ii = 0; ii < mi; ++ii) {
+                            const __m256i a0 = _mm256_loadu_si256(
+                                reinterpret_cast<const __m256i*>(arows[ii] + k0 + kk));
+                            const __m256i a1 = _mm256_loadu_si256(
+                                reinterpret_cast<const __m256i*>(arows[ii] + k0 + kk + 32));
+                            const __m256i av0 = _mm256_permute2x128_si256(a0, a1, 0x20);
+                            const __m256i av1 = _mm256_permute2x128_si256(a0, a1, 0x31);
+                            const __m256i p0 = _mm256_maddubs_epi16(_mm256_abs_epi8(av0),
+                                                                    _mm256_sign_epi8(b_lo, av0));
+                            const __m256i p1 = _mm256_maddubs_epi16(_mm256_abs_epi8(av1),
+                                                                    _mm256_sign_epi8(b_hi, av1));
+                            accv[ii] = _mm256_add_epi32(accv[ii], _mm256_madd_epi16(p0, ones));
+                            accv[ii] = _mm256_add_epi32(accv[ii], _mm256_madd_epi16(p1, ones));
+                        }
+                    }
+                    for (std::int32_t ii = 0; ii < mi; ++ii) {
+                        __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(accv[ii]),
+                                                       _mm256_extracti128_si256(accv[ii], 1));
+                        sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
+                        sum128 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 4));
+                        sums_int32[ii] = _mm_cvtsi128_si32(sum128);
+                    }
+#endif
+                    for (; kk < max_kk; ++kk) {
+                        const std::int32_t k = k0 + kk;
+                        const std::int32_t bv = detail::unpack_weight_block(packed_b, k, 4);
+                        for (std::int32_t ii = 0; ii < mi; ++ii) {
+                            sums_int32[ii] += static_cast<std::int32_t>(arows[ii][k]) * bv;
+                        }
+                    }
+                    for (std::int32_t ii = 0; ii < mi; ++ii) {
+                        sums[ii] += static_cast<float>(sums_int32[ii]) * adescs[ii][g] / b_scale_ptr[g];
+                    }
+                }
+                for (std::int32_t ii = 0; ii < mi; ++ii) {
+                    store_value(i0 + ii, j, sums[ii] * alpha);
+                }
             }
         }
 
