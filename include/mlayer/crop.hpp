@@ -27,10 +27,11 @@ public:
         this->hoffset = pd.get(1, 0);
         this->doffset = pd.get(13, 0);
         this->coffset = pd.get(2, 0);
-        this->outw = pd.get(3, 0);
-        this->outh = pd.get(4, 0);
-        this->outd = pd.get(14, 0);
-        this->outc = pd.get(5, 0);
+        // -233 means "take the whole remaining extent", as in ncnn.
+        this->outw = pd.get(3, -233);
+        this->outh = pd.get(4, -233);
+        this->outd = pd.get(14, -233);
+        this->outc = pd.get(5, -233);
         this->woffset2 = pd.get(6, 0);
         this->hoffset2 = pd.get(7, 0);
         this->doffset2 = pd.get(15, 0);
@@ -132,6 +133,14 @@ public:
 
         MatT& top = top_blobs[0];
         const std::int32_t dims = bottom.dims;
+        // Blobs below 3-D have implicit h/c of one; cropping a 1-D blob must not
+        // fail because outh/outc were left unspecified.
+        if (dims == 1) {
+            oh = 1;
+            oc = 1;
+        } else if (dims == 2) {
+            oc = 1;
+        }
         if (ow <= 0 || oh <= 0 || od <= 0 || oc <= 0) {
             return -100;
         }
