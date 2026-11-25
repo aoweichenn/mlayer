@@ -5,6 +5,8 @@
 #ifndef MLAYER_GEMM_HPP
 #define MLAYER_GEMM_HPP
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -33,6 +35,10 @@ public:
         this->output_N1M = 0;
         this->output_transpose = 0;
         this->quantize_term = 0;
+        this->weight_block_quantize = false;
+        this->weight_block_quantize_bits = 0;
+        this->weight_block_quantize_block_size = 0;
+        this->weight_block_quantize_has_input_scale = false;
     }
 
     std::int32_t load_param(const ParamDictT& pd) override {
@@ -51,8 +57,23 @@ public:
         this->output_transpose = pd.get(14, 0);
         this->quantize_term = pd.get(18, 0);
 
+        this->weight_block_quantize = false;
         if (this->quantize_term != 0) {
-            return -1;
+            this->weight_block_quantize_bits = this->quantize_term / 100;
+            const std::int32_t format_code = this->quantize_term % 100 / 10;
+            const std::int32_t block_size_code = this->quantize_term % 10;
+            if ((this->weight_block_quantize_bits != 4 && this->weight_block_quantize_bits != 6 &&
+                 this->weight_block_quantize_bits != 8) ||
+                (format_code != 0 && format_code != 1) || block_size_code < 0 || block_size_code > 2) {
+                return -1;
+            }
+            this->weight_block_quantize_block_size =
+                block_size_code == 0 ? 32 : (block_size_code == 1 ? 64 : 128);
+            this->weight_block_quantize_has_input_scale = format_code == 1;
+            this->weight_block_quantize = true;
+            if (this->constantB == 0 || this->transB != 1) {
+                return -1;
+            }
         }
 
         if (this->constantA == 0 && this->constantB == 1 && this->constantC == 1) {
@@ -76,8 +97,14 @@ public:
             }
         }
         if (this->constantB != 0) {
-            this->B_data = this->transB == 0 ? mb.load(this->constantN, this->constantK, 0)
-                                             : mb.load(this->constantK, this->constantN, 0);
+            if (this->weight_block_quantize) {
+                const std::int32_t packed_k_bytes =
+                    (this->constantK * this->weight_block_quantize_bits + 7) / 8;
+                this->B_data = mb.load(packed_k_bytes, this->constantN, this->weight_block_quantize_bits);
+            } else {
+                this->B_data = this->transB == 0 ? mb.load(this->constantN, this->constantK, 0)
+                                                 : mb.load(this->constantK, this->constantN, 0);
+            }
             if (this->B_data.empty()) {
                 return -100;
             }
@@ -98,6 +125,21 @@ public:
                 return -100;
             }
         }
+        if (this->weight_block_quantize) {
+            const std::int32_t block_count =
+                (this->constantK + this->weight_block_quantize_block_size - 1) /
+                this->weight_block_quantize_block_size;
+            this->B_data_quantize_scales = mb.load(block_count, this->constantN, 1);
+            if (this->B_data_quantize_scales.empty()) {
+                return -100;
+            }
+            if (this->weight_block_quantize_has_input_scale) {
+                this->B_data_input_scales = mb.load(this->constantK, 1);
+                if (this->B_data_input_scales.empty()) {
+                    return -100;
+                }
+            }
+        }
         return 0;
     }
 
@@ -112,6 +154,10 @@ public:
 
     std::int32_t forward(const std::vector<MatT>& bottom_blobs, std::vector<MatT>& top_blobs,
                          const OptionT& opt) const override {
+        if (this->weight_block_quantize) {
+            return this->forward_weight_block_quantize(bottom_blobs, top_blobs, opt);
+        }
+
         const MatT& A0 = this->constantA != 0 ? this->A_data : bottom_blobs[0];
         const MatT& B0 = this->constantB != 0 ? this->B_data
                          : this->constantA != 0 ? bottom_blobs[0]
@@ -246,6 +292,167 @@ public:
         return 0;
     }
 
+private:
+    std::int32_t forward_weight_block_quantize(const std::vector<MatT>& bottom_blobs,
+                                               std::vector<MatT>& top_blobs, const OptionT& opt) const {
+        const MatT& A = bottom_blobs[0];
+        const std::int32_t K = this->transA != 0
+                                   ? (A.dims == 3 ? A.c : A.h) * A.elempack
+                                   : A.w;
+        const std::int32_t M = this->transA != 0
+                                   ? A.w
+                                   : (A.dims == 3 ? A.c : A.h) * A.elempack;
+        const std::int32_t N = this->constantN;
+        const std::int32_t block_size = this->weight_block_quantize_block_size;
+
+        MatT C;
+        std::int32_t broadcast_type_C = 0;
+        if (this->constantC != 0) {
+            C = this->C_data;
+            broadcast_type_C = this->constant_broadcast_type_C;
+        } else if (bottom_blobs.size() == 2) {
+            C = bottom_blobs[1];
+        }
+
+        MatT& top = top_blobs[0];
+        if (this->output_transpose != 0) {
+            top.create(this->output_N1M != 0 ? M : M, this->output_N1M != 0 ? 1 : N, 4u, opt.blob_allocator);
+            if (this->output_N1M != 0) {
+                top = top.reshape(M, 1, N, opt.blob_allocator);
+            }
+        } else {
+            if (this->output_N1M != 0) {
+                top.create(N, 1, M, 4u, opt.blob_allocator);
+            } else {
+                top.create(N, M, 4u, opt.blob_allocator);
+            }
+        }
+        if (top.empty()) {
+            return -100;
+        }
+
+        return this->weight_block_quantize_gemm(A, this->transA, this->B_data, this->B_data_quantize_scales,
+                                                this->B_data_input_scales, C, top, M, N, K, block_size,
+                                                this->alpha, this->beta, broadcast_type_C,
+                                                this->output_transpose, opt);
+    }
+
+    static std::int32_t weight_block_quantize_gemm(
+        const MatT& A, std::int32_t transA, const MatT& BT, const MatT& BT_scales, const MatT& input_scales,
+        const MatT& C, MatT& top_blob, std::int32_t M, std::int32_t N, std::int32_t K,
+        std::int32_t block_size, float alpha, float beta, std::int32_t broadcast_type_C,
+        std::int32_t output_transpose, const OptionT& opt) {
+        const std::int32_t block_count = (K + block_size - 1) / block_size;
+
+        MatT A_int8;
+        A_int8.create(K, M, 1u, opt.workspace_allocator);
+        if (A_int8.empty()) {
+            return -100;
+        }
+        MatT A_descales;
+        A_descales.create(block_count, M, 4u, opt.workspace_allocator);
+        if (A_descales.empty()) {
+            return -100;
+        }
+
+        const std::size_t A_hstep = A.dims == 3 ? A.cstep : static_cast<std::size_t>(A.w);
+        const bool has_input_scale = !input_scales.empty();
+        const float* input_scale_ptr = has_input_scale ? static_cast<const float*>(input_scales) : nullptr;
+
+#pragma omp parallel for num_threads(opt.num_threads)
+        for (std::int32_t i = 0; i < M; ++i) {
+            auto* outptr = A_int8.template row<std::int8_t>(i);
+            float* descale_ptr = A_descales.row(i);
+            for (std::int32_t g = 0; g < block_count; ++g) {
+                const std::int32_t k0 = g * block_size;
+                const std::int32_t max_kk = block_size < K - k0 ? block_size : K - k0;
+                float absmax = 0.0F;
+                for (std::int32_t kk = 0; kk < max_kk; ++kk) {
+                    const std::int32_t k = k0 + kk;
+                    float v = transA != 0
+                                  ? static_cast<const float*>(A)[static_cast<std::size_t>(k) * A_hstep +
+                                                                 static_cast<std::size_t>(i)]
+                                  : static_cast<const float*>(A)[static_cast<std::size_t>(i) * A_hstep +
+                                                                 static_cast<std::size_t>(k)];
+                    if (has_input_scale) {
+                        v *= input_scale_ptr[k];
+                    }
+                    absmax = std::max(absmax, std::fabs(v));
+                }
+                if (absmax == 0.0F) {
+                    descale_ptr[g] = 0.0F;
+                    for (std::int32_t kk = 0; kk < max_kk; ++kk) {
+                        outptr[k0 + kk] = 0;
+                    }
+                    continue;
+                }
+                const float scale = 127.0F / absmax;
+                descale_ptr[g] = absmax / 127.0F;
+                for (std::int32_t kk = 0; kk < max_kk; ++kk) {
+                    const std::int32_t k = k0 + kk;
+                    float v = transA != 0
+                                  ? static_cast<const float*>(A)[static_cast<std::size_t>(k) * A_hstep +
+                                                                 static_cast<std::size_t>(i)]
+                                  : static_cast<const float*>(A)[static_cast<std::size_t>(i) * A_hstep +
+                                                                 static_cast<std::size_t>(k)];
+                    if (has_input_scale) {
+                        v *= input_scale_ptr[k];
+                    }
+                    const auto q = static_cast<std::int32_t>(std::round(v * scale));
+                    outptr[k0 + kk] = static_cast<std::int8_t>(std::max(-127, std::min(127, q)));
+                }
+            }
+        }
+
+        const float* ptrC = C.empty() ? nullptr : static_cast<const float*>(C);
+        const std::size_t out_hstep = top_blob.dims == 3 ? top_blob.cstep : static_cast<std::size_t>(top_blob.w);
+
+#pragma omp parallel for num_threads(opt.num_threads)
+        for (std::int32_t mn = 0; mn < M * N; ++mn) {
+            const std::int32_t i = mn / N;
+            const std::int32_t j = mn % N;
+            float sum = 0.0F;
+            if (ptrC != nullptr) {
+                if (broadcast_type_C == 0) {
+                    sum = ptrC[0];
+                } else if (broadcast_type_C == 1 || broadcast_type_C == 2) {
+                    sum = ptrC[static_cast<std::size_t>(i)];
+                } else if (broadcast_type_C == 3) {
+                    sum = ptrC[static_cast<std::size_t>(i) * static_cast<std::size_t>(N) +
+                               static_cast<std::size_t>(j)];
+                } else if (broadcast_type_C == 4) {
+                    sum = ptrC[static_cast<std::size_t>(j)];
+                }
+                sum *= beta;
+            }
+
+            const auto* ptrA = A_int8.template row<const std::int8_t>(i);
+            const auto* ptrB = BT.template row<const std::int8_t>(j);
+            const float* A_descale_ptr = A_descales.row(i);
+            const float* B_scale_ptr = BT_scales.row(j);
+
+            for (std::int32_t g = 0; g < block_count; ++g) {
+                const std::int32_t k0 = g * block_size;
+                const std::int32_t max_kk = block_size < K - k0 ? block_size : K - k0;
+                std::int32_t sum_int32 = 0;
+                for (std::int32_t kk = 0; kk < max_kk; ++kk) {
+                    const std::int32_t k = k0 + kk;
+                    sum_int32 += static_cast<std::int32_t>(ptrA[k]) * static_cast<std::int32_t>(ptrB[k]);
+                }
+                sum += static_cast<float>(sum_int32) * A_descale_ptr[g] / B_scale_ptr[g];
+            }
+            sum *= alpha;
+
+            if (output_transpose != 0) {
+                top_blob[static_cast<std::size_t>(j) * out_hstep + static_cast<std::size_t>(i)] = sum;
+            } else {
+                top_blob[static_cast<std::size_t>(i) * out_hstep + static_cast<std::size_t>(j)] = sum;
+            }
+        }
+
+        return 0;
+    }
+
 public:
     float alpha;
     float beta;
@@ -261,9 +468,15 @@ public:
     std::int32_t output_N1M;
     std::int32_t output_transpose;
     std::int32_t quantize_term;
+    bool weight_block_quantize;
+    std::int32_t weight_block_quantize_bits;
+    std::int32_t weight_block_quantize_block_size;
+    bool weight_block_quantize_has_input_scale;
     MatT A_data;
     MatT B_data;
     MatT C_data;
+    MatT B_data_quantize_scales;
+    MatT B_data_input_scales;
 };
 
 }  // namespace mlayer

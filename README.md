@@ -56,7 +56,7 @@
 | `MatMul` | `include/mlayer/matmul.hpp` | 1D–4D 矩阵乘，transB |
 | `Interp` | `include/mlayer/interp.hpp` | nearest / bilinear 上采样 |
 | `Embed` | `include/mlayer/embed.hpp` | token embedding 查表 |
-| `Gemm` | `include/mlayer/gemm.hpp` | 标准 fp32 Gemm（int8 量化路径待补） |
+| `Gemm` | `include/mlayer/gemm.hpp` | fp32 与 int8 block 量化 Gemm |
 | `RotaryEmbed` | `include/mlayer/rotaryembed.hpp` | RoPE，interleaved/半宽 cache |
 | `SDPA` | `include/mlayer/sdpa.hpp` | scaled dot-product attention + KV cache |
 
