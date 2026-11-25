@@ -53,6 +53,15 @@ public:
 
 public:
     float slope;
+
+    std::int32_t get_fused_activation(std::int32_t& type, MatT& params) const override {
+        type = slope == 0.0F ? 1 : 2;
+        params = type == 2 ? MatT(1) : MatT();
+        if (type == 2) {
+            params[0] = slope;
+        }
+        return 0;
+    }
 };
 
 }  // namespace mlayer

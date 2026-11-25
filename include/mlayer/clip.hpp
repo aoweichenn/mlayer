@@ -52,6 +52,14 @@ public:
 public:
     float min;
     float max;
+
+    std::int32_t get_fused_activation(std::int32_t& type, MatT& params) const override {
+        type = 3;
+        params = MatT(2);
+        params[0] = min;
+        params[1] = max;
+        return 0;
+    }
 };
 
 }  // namespace mlayer

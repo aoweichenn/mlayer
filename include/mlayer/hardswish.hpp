@@ -53,6 +53,14 @@ public:
         return 0;
     }
 
+    std::int32_t get_fused_activation(std::int32_t& type, MatT& params) const override {
+        type = 6;
+        params = MatT(2);
+        params[0] = alpha;
+        params[1] = beta;
+        return 0;
+    }
+
 public:
     float alpha;
     float beta;

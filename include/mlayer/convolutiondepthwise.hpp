@@ -7,6 +7,11 @@
 
 #include <climits>
 #include <cmath>
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -301,12 +306,53 @@ std::int32_t ConvolutionDepthWise<LayerT, MatT, OptionT, ParamDictT, ModelBinT, 
     // depth-wise
     if (inch == group && group == outch)
     {
+        // One channel per output and per-tap weights shared by all pixels, so
+        // eight output pixels can be produced per vector iteration.
+        const bool vectorizable = stride_w == 1 && activation_type == 0 && maxk <= 9;
         #pragma omp parallel for num_threads(opt.num_threads)
         for (std::int32_t g = 0; g < group; g++)
         {
             float* outptr = top_blob.channel(g);
             const float* kptr = (const float*)weight_data + maxk * g;
             const MatT m = bottom_blob.channel(g);
+
+            if (vectorizable)
+            {
+#if defined(__AVX2__)
+                __m256 wv[9];
+                for (std::int32_t k = 0; k < maxk; k++)
+                {
+                    wv[k] = _mm256_set1_ps(kptr[k]);
+                }
+                const __m256 bv = _mm256_set1_ps(bias_term ? bias_data[g] : 0.f);
+
+                for (std::int32_t i = 0; i < outh; i++)
+                {
+                    const float* sptr = m.row(i * stride_h);
+                    float* optr = outptr + i * outw;
+                    std::int32_t j = 0;
+                    for (; j + 8 <= outw; j += 8)
+                    {
+                        __m256 acc = bv;
+                        for (std::int32_t k = 0; k < maxk; k++)
+                        {
+                            acc = _mm256_fmadd_ps(_mm256_loadu_ps(sptr + j + space_ofs[k]), wv[k], acc);
+                        }
+                        _mm256_storeu_ps(optr + j, acc);
+                    }
+                    for (; j < outw; j++)
+                    {
+                        float sum = bias_term ? bias_data[g] : 0.f;
+                        for (std::int32_t k = 0; k < maxk; k++)
+                        {
+                            sum += sptr[j + space_ofs[k]] * kptr[k];
+                        }
+                        optr[j] = sum;
+                    }
+                }
+                continue;
+#endif
+            }
 
             for (std::int32_t i = 0; i < outh; i++)
             {

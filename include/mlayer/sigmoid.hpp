@@ -40,6 +40,12 @@ public:
 
         return 0;
     }
+
+    std::int32_t get_fused_activation(std::int32_t& type, MatT& params) const override {
+        type = 4;
+        params = MatT();
+        return 0;
+    }
 };
 
 }  // namespace mlayer

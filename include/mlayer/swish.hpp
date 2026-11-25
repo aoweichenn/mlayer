@@ -79,6 +79,14 @@ public:
 
         return 0;
     }
+
+    // mnet-only fused activation id used by the graph fusion pass; ncnn keeps
+    // SiLU as a standalone layer (fused_activation.h has no swish case).
+    std::int32_t get_fused_activation(std::int32_t& type, MatT& params) const override {
+        type = 7;
+        params = MatT();
+        return 0;
+    }
 };
 
 }  // namespace mlayer

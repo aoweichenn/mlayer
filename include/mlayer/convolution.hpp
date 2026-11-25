@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <mlayer/border.hpp>
+#include <mlayer/vecmath.hpp>
 #include <mlayer/quantize.hpp>
 
 namespace mlayer {
@@ -32,6 +33,20 @@ public:
     std::int32_t load_param(const ParamDictT& pd) override;
     std::int32_t load_model(const ModelBinT& mb) override;
     std::int32_t forward(const MatT& bottom_blob, MatT& top_blob, const OptionT& opt) const override;
+
+    // Absorb a following activation layer into the epilogue when the layer has
+    // no activation of its own yet.
+    bool can_fuse_activation(std::int32_t type) const override {
+        if (this->activation_type != 0) {
+            return false;
+        }
+        return type == 1 || type == 2 || type == 3 || type == 4 || type == 6 || type == 7;
+    }
+
+    void set_fused_activation(std::int32_t type, const MatT& params) override {
+        this->activation_type = type;
+        this->activation_params = params;
+    }
     std::int32_t forward(const std::vector<MatT>& bottom_blobs, std::vector<MatT>& top_blobs, const OptionT& opt) const override;
 
 protected:
@@ -435,7 +450,17 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
 
         for (std::int32_t t = 0; t < np; t++)
         {
-            for (std::int32_t i = i_begin; i < i_end; i++)
+            std::int32_t i = i_begin;
+#if defined(__AVX2__)
+            if (activation_type == 7)
+            {
+                for (; i + 8 <= i_end; i += 8)
+                {
+                    _mm256_storeu_ps(outptr[t] + i, vec_silu_ps(_mm256_loadu_ps(outptr[t] + i)));
+                }
+            }
+#endif
+            for (; i < i_end; i++)
             {
                 outptr[t][i] = fused_activation(outptr[t][i], activation_type, activation_params);
             }
@@ -824,20 +849,39 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
                         a13 = _mm256_fmadd_ps(v1, wv3, a13);
                     }
 
-                    if (jcount0 == kSubtile && jcount1 == kSubtile && plain_store)
+                    if (jcount0 == kSubtile && jcount1 == kSubtile && (plain_store || activation_type == 7))
                     {
                         const __m256 vb0 = _mm256_set1_ps(b0);
                         const __m256 vb1 = _mm256_set1_ps(b1);
                         const __m256 vb2 = _mm256_set1_ps(b2);
                         const __m256 vb3 = _mm256_set1_ps(b3);
-                        _mm256_storeu_ps(o0 + jbase0, _mm256_add_ps(a00, vb0));
-                        _mm256_storeu_ps(o1 + jbase0, _mm256_add_ps(a01, vb1));
-                        _mm256_storeu_ps(o2 + jbase0, _mm256_add_ps(a02, vb2));
-                        _mm256_storeu_ps(o3 + jbase0, _mm256_add_ps(a03, vb3));
-                        _mm256_storeu_ps(o0 + jbase1, _mm256_add_ps(a10, vb0));
-                        _mm256_storeu_ps(o1 + jbase1, _mm256_add_ps(a11, vb1));
-                        _mm256_storeu_ps(o2 + jbase1, _mm256_add_ps(a12, vb2));
-                        _mm256_storeu_ps(o3 + jbase1, _mm256_add_ps(a13, vb3));
+                        __m256 r00 = _mm256_add_ps(a00, vb0);
+                        __m256 r01 = _mm256_add_ps(a01, vb1);
+                        __m256 r02 = _mm256_add_ps(a02, vb2);
+                        __m256 r03 = _mm256_add_ps(a03, vb3);
+                        __m256 r10 = _mm256_add_ps(a10, vb0);
+                        __m256 r11 = _mm256_add_ps(a11, vb1);
+                        __m256 r12 = _mm256_add_ps(a12, vb2);
+                        __m256 r13 = _mm256_add_ps(a13, vb3);
+                        if (activation_type == 7)
+                        {
+                            r00 = vec_silu_ps(r00);
+                            r01 = vec_silu_ps(r01);
+                            r02 = vec_silu_ps(r02);
+                            r03 = vec_silu_ps(r03);
+                            r10 = vec_silu_ps(r10);
+                            r11 = vec_silu_ps(r11);
+                            r12 = vec_silu_ps(r12);
+                            r13 = vec_silu_ps(r13);
+                        }
+                        _mm256_storeu_ps(o0 + jbase0, r00);
+                        _mm256_storeu_ps(o1 + jbase0, r01);
+                        _mm256_storeu_ps(o2 + jbase0, r02);
+                        _mm256_storeu_ps(o3 + jbase0, r03);
+                        _mm256_storeu_ps(o0 + jbase1, r10);
+                        _mm256_storeu_ps(o1 + jbase1, r11);
+                        _mm256_storeu_ps(o2 + jbase1, r12);
+                        _mm256_storeu_ps(o3 + jbase1, r13);
                     }
                     else
                     {
