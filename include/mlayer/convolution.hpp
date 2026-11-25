@@ -7,6 +7,10 @@
 
 #include <climits>
 #include <cmath>
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -37,6 +41,8 @@ protected:
     std::int32_t forward_int8(const MatT& bottom_blob, MatT& top_blob, const OptionT& opt) const;
 
     static std::int32_t convolution(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t kernel_w, std::int32_t kernel_h, std::int32_t stride_w, std::int32_t stride_h, std::int32_t dilation_w, std::int32_t dilation_h, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
+
+    static std::int32_t convolution_1x1(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt);
 
 public:
     std::int32_t num_output;
@@ -293,6 +299,61 @@ std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate,
             }
 
             outptr += outw;
+        }
+    }
+
+    return 0;
+}
+
+MLAYER_CONVOLUTION_TEMPLATE
+std::int32_t Convolution<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate, Int8, Activation, QuantizeInt8, CopyMakeBorder>::convolution_1x1(const MatT& bottom_blob, MatT& top_blob, const MatT& weight_data, const MatT& bias_data, std::int32_t activation_type, const MatT& activation_params, const OptionT& opt)
+{
+    const std::int32_t outw = bottom_blob.w;
+    const std::int32_t outh = bottom_blob.h;
+    const std::int32_t inch = bottom_blob.c;
+    const std::int32_t outch = top_blob.c;
+    const std::int32_t size = outw * outh;
+
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (std::int32_t p = 0; p < outch; p++)
+    {
+        float* outptr = top_blob.channel(p);
+        const float bias = bias_data.empty() ? 0.f : bias_data[p];
+        for (std::int32_t i = 0; i < size; i++)
+        {
+            outptr[i] = bias;
+        }
+
+        const float* kptr = static_cast<const float*>(weight_data) + inch * p;
+        for (std::int32_t q = 0; q < inch; q++)
+        {
+            const float w = kptr[q];
+            const float* sptr = bottom_blob.channel(q);
+
+#if defined(__AVX2__)
+            __m256 wv = _mm256_set1_ps(w);
+            std::int32_t i = 0;
+            for (; i + 8 <= size; i += 8)
+            {
+                __m256 v = _mm256_loadu_ps(sptr + i);
+                __m256 o = _mm256_loadu_ps(outptr + i);
+                _mm256_storeu_ps(outptr + i, _mm256_fmadd_ps(v, wv, o));
+            }
+            for (; i < size; i++)
+            {
+                outptr[i] += sptr[i] * w;
+            }
+#else
+            for (std::int32_t i = 0; i < size; i++)
+            {
+                outptr[i] += sptr[i] * w;
+            }
+#endif
+        }
+
+        for (std::int32_t i = 0; i < size; i++)
+        {
+            outptr[i] = Activation(outptr[i], activation_type, activation_params);
         }
     }
 

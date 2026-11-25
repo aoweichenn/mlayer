@@ -8,6 +8,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 #include <cstdint>
 #include <vector>
 
@@ -281,9 +285,28 @@ public:
                 }
                 sum *= this->beta;
             }
+#if defined(__AVX2__)
+            {
+                __m256 acc = _mm256_setzero_ps();
+                std::int32_t k = 0;
+                for (; k + 8 <= K; k += 8) {
+                    acc = _mm256_fmadd_ps(_mm256_loadu_ps(ptrA + k), _mm256_loadu_ps(ptrBT + k), acc);
+                }
+                __m128 lo = _mm256_castps256_ps128(acc);
+                __m128 hi = _mm256_extractf128_ps(acc, 1);
+                __m128 s128 = _mm_add_ps(lo, hi);
+                s128 = _mm_hadd_ps(s128, s128);
+                s128 = _mm_hadd_ps(s128, s128);
+                sum += _mm_cvtss_f32(s128);
+                for (; k < K; ++k) {
+                    sum += ptrA[k] * ptrBT[k];
+                }
+            }
+#else
             for (std::int32_t k = 0; k < K; ++k) {
                 sum += ptrA[k] * ptrBT[k];
             }
+#endif
             sum *= this->alpha;
 
             if (this->output_transpose != 0) {

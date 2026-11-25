@@ -50,13 +50,15 @@
 | `Softmax` | `include/mlayer/softmax.hpp` | 1D–4D softmax，正/负 axis |
 | `YoloV5Focus` | `include/mlayer/yolov5focus.hpp` | 可选 examples 自定义层（非 ncnn core） |
 | `Slice` | `include/mlayer/slice.hpp` | 1D–4D 切片，slices/indices 两种模式 |
+| `Concat` | `include/mlayer/concat.hpp` | 1D–4D 拼接 |
+| `Split` | `include/mlayer/split.hpp` | 单输入多输出拆分 |
 | `BinaryOp` | `include/mlayer/binaryop.hpp` | 逐元素二元运算，含标量与广播 |
 | `Permute` | `include/mlayer/permute.hpp` | 1D–4D 维度重排 |
 | `Reshape` | `include/mlayer/reshape.hpp` | 数值参数与简单 shape 表达式 |
 | `MatMul` | `include/mlayer/matmul.hpp` | 1D–4D 矩阵乘，transB |
 | `Interp` | `include/mlayer/interp.hpp` | nearest / bilinear 上采样 |
 | `Embed` | `include/mlayer/embed.hpp` | token embedding 查表 |
-| `Gemm` | `include/mlayer/gemm.hpp` | fp32 与 int8 block 量化 Gemm |
+| `Gemm` | `include/mlayer/gemm.hpp` | fp32（含 AVX2/FMA）与 int8 block 量化 Gemm |
 | `RotaryEmbed` | `include/mlayer/rotaryembed.hpp` | RoPE，interleaved/半宽 cache |
 | `SDPA` | `include/mlayer/sdpa.hpp` | scaled dot-product attention + KV cache |
 

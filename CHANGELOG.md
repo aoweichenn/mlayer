@@ -24,4 +24,5 @@
 * `Reshape` / `MatMul` / `Interp`：YOLO 所需的 reshape、矩阵乘与上采样。
 * `Embed` / `Gemm` / `RotaryEmbed` / `SDPA`：Qwen3 0.6B decoder 所需路径。
 * `Gemm` 增加 int8 block 量化权重路径（8-bit，block 32/64/128）。
+* `Concat` / `Split` 正式迁入；`Gemm` 增加 AVX2/FMA 点积，`Convolution` 增加 1x1 AVX2 路径。
 * ncnn 侧 base layer 切到 mlayer，arch 特化与注册不变；189/189 测试通过。
