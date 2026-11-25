@@ -143,6 +143,22 @@ public:
             if (this->B_data_quantize_scales.empty()) {
                 return -100;
             }
+            // ARM float division is expensive (tens of cycles); precompute the
+            // per-block reciprocal once at load time.
+            this->B_data_quantize_scales_recip.create(block_count, this->constantN,
+                                                      static_cast<std::size_t>(4u), nullptr);
+            if (this->B_data_quantize_scales_recip.empty()) {
+                return -100;
+            }
+            {
+                const float* src = this->B_data_quantize_scales;
+                float* dst = this->B_data_quantize_scales_recip;
+                const std::size_t count =
+                    static_cast<std::size_t>(block_count) * static_cast<std::size_t>(this->constantN);
+                for (std::size_t i = 0; i < count; ++i) {
+                    dst[i] = src[i] == 0.0F ? 0.0F : 1.0F / src[i];
+                }
+            }
             if (this->weight_block_quantize_has_input_scale) {
                 this->B_data_input_scales = mb.load(this->constantK, 1);
                 if (this->B_data_input_scales.empty()) {
@@ -364,17 +380,19 @@ private:
         }
 
         return this->weight_block_quantize_gemm(
-            A, this->transA, this->B_data, this->B_data_quantize_scales, this->B_data_input_scales, C, top, M,
-            N, K, block_size, this->weight_block_quantize_bits, this->alpha, this->beta, broadcast_type_C,
-            this->output_transpose, opt);
+            A, this->transA, this->B_data, this->B_data_quantize_scales, this->B_data_quantize_scales_recip,
+            this->B_data_input_scales, C, top, M, N, K, block_size, this->weight_block_quantize_bits,
+            this->alpha, this->beta, broadcast_type_C, this->output_transpose, opt);
     }
 
     static std::int32_t weight_block_quantize_gemm(
-        const MatT& A, std::int32_t transA, const MatT& BT, const MatT& BT_scales, const MatT& input_scales,
-        const MatT& C, MatT& top_blob, std::int32_t M, std::int32_t N, std::int32_t K,
-        std::int32_t block_size, std::int32_t bits, float alpha, float beta,
-        std::int32_t broadcast_type_C, std::int32_t output_transpose, const OptionT& opt) {
+        const MatT& A, std::int32_t transA, const MatT& BT, const MatT& BT_scales,
+        const MatT& BT_scales_recip, const MatT& input_scales, const MatT& C, MatT& top_blob,
+        std::int32_t M, std::int32_t N, std::int32_t K, std::int32_t block_size, std::int32_t bits,
+        float alpha, float beta, std::int32_t broadcast_type_C, std::int32_t output_transpose,
+        const OptionT& opt) {
         const std::int32_t block_count = (K + block_size - 1) / block_size;
+        const std::int32_t num_threads = opt.num_threads;
         // Process kMTile activation rows per weight row read. Prefill passes
         // M=seqlen and previously re-read every weight row M times; tiling
         // reduces weight traffic by up to kMTile with identical arithmetic
@@ -422,7 +440,7 @@ private:
         if (bits != 8 && !(bits == 4 && fast_int4)) {
             // ncnn dequantizes 4/6-bit weights to fp32 and multiplies them with
             // the fp32 activation (no activation quantization on this path).
-#pragma omp parallel for num_threads(opt.num_threads)
+#pragma omp parallel for num_threads(num_threads)
             for (std::int32_t work = 0; work < mt_count * N; ++work) {
                 const std::int32_t t = work / N;
                 const std::int32_t j = work % N;
@@ -473,7 +491,7 @@ private:
 
         const bool has_input_scale = !input_scales.empty();
 
-#pragma omp parallel for num_threads(opt.num_threads)
+#pragma omp parallel for num_threads(num_threads)
         for (std::int32_t i = 0; i < M; ++i) {
             auto* outptr = A_int8.template row<std::int8_t>(i);
             float* descale_ptr = A_descales.row(i);
@@ -519,7 +537,7 @@ private:
         }
 
         if (bits == 8) {
-#pragma omp parallel for num_threads(opt.num_threads)
+#pragma omp parallel for num_threads(num_threads)
             for (std::int32_t work = 0; work < mt_count * N; ++work) {
                 const std::int32_t t = work / N;
                 const std::int32_t j = work % N;
@@ -537,6 +555,41 @@ private:
 
             const auto* ptrB = BT.template row<const std::int8_t>(j);
             const float* b_scale_ptr = BT_scales.row(j);
+
+#if defined(__ARM_NEON)
+            if (mi == 1) {
+                // Decode path (M=1): keep the block accumulator in a register
+                // instead of the kMTile array to avoid per-chunk spills.
+                const std::int8_t* arow = arows[0];
+                float sum = sums[0];
+                for (std::int32_t g = 0; g < block_count; ++g) {
+                    const std::int32_t k0 = g * block_size;
+                    const std::int32_t max_kk = block_size < K - k0 ? block_size : K - k0;
+                    int32x4_t acc = vdupq_n_s32(0);
+                    std::int32_t kk = 0;
+                    for (; kk + 16 <= max_kk; kk += 16) {
+                        const int8x16_t av = vld1q_s8(arow + k0 + kk);
+                        const int8x16_t bv = vld1q_s8(ptrB + k0 + kk);
+#if defined(__ARM_FEATURE_DOTPROD)
+                        acc = vdotq_s32(acc, av, bv);
+#else
+                        acc = vpadalq_s16(acc, vmull_s8(vget_low_s8(av), vget_low_s8(bv)));
+                        acc = vpadalq_s16(acc, vmull_s8(vget_high_s8(av), vget_high_s8(bv)));
+#endif
+                    }
+                    std::int32_t sum_int32 = vaddvq_s32(acc);
+                    for (; kk < max_kk; ++kk) {
+                        sum_int32 += static_cast<std::int32_t>(arow[k0 + kk]) *
+                                     static_cast<std::int32_t>(ptrB[k0 + kk]);
+                    }
+                    const float b_recip =
+                        BT_scales_recip.empty() ? 1.0F / b_scale_ptr[g] : BT_scales_recip.row(j)[g];
+                    sum += static_cast<float>(sum_int32) * adescs[0][g] * b_recip;
+                }
+                store_value(i0, j, sum * alpha);
+                continue;
+            }
+#endif
 
             for (std::int32_t g = 0; g < block_count; ++g) {
                 const std::int32_t k0 = g * block_size;
@@ -601,8 +654,10 @@ private:
                         sums_int32[ii] += static_cast<std::int32_t>(arows[ii][k]) * bv;
                     }
                 }
+                const float b_recip = BT_scales_recip.empty() ? 1.0F / b_scale_ptr[g]
+                                                              : BT_scales_recip.row(j)[g];
                 for (std::int32_t ii = 0; ii < mi; ++ii) {
-                    sums[ii] += static_cast<float>(sums_int32[ii]) * adescs[ii][g] / b_scale_ptr[g];
+                    sums[ii] += static_cast<float>(sums_int32[ii]) * adescs[ii][g] * b_recip;
                 }
             }
             for (std::int32_t ii = 0; ii < mi; ++ii) {
@@ -613,7 +668,7 @@ private:
             // bits == 4 with opt-in fast kernel: int8 activation quantization
             // plus on-the-fly 4-bit unpack (intentional divergence from ncnn's
             // fp32-activation int4 reference path).
-#pragma omp parallel for num_threads(opt.num_threads)
+#pragma omp parallel for num_threads(num_threads)
             for (std::int32_t work = 0; work < mt_count * N; ++work) {
                 const std::int32_t t = work / N;
                 const std::int32_t j = work % N;
@@ -686,8 +741,10 @@ private:
                             sums_int32[ii] += static_cast<std::int32_t>(arows[ii][k]) * bv;
                         }
                     }
+                    const float b_recip = BT_scales_recip.empty() ? 1.0F / b_scale_ptr[g]
+                                                                  : BT_scales_recip.row(j)[g];
                     for (std::int32_t ii = 0; ii < mi; ++ii) {
-                        sums[ii] += static_cast<float>(sums_int32[ii]) * adescs[ii][g] / b_scale_ptr[g];
+                        sums[ii] += static_cast<float>(sums_int32[ii]) * adescs[ii][g] * b_recip;
                     }
                 }
                 for (std::int32_t ii = 0; ii < mi; ++ii) {
@@ -721,6 +778,7 @@ public:
     MatT B_data;
     MatT C_data;
     MatT B_data_quantize_scales;
+    MatT B_data_quantize_scales_recip;
     MatT B_data_input_scales;
 };
 
