@@ -19,4 +19,5 @@
 * `ShuffleChannel` / `PixelShuffle` / `Reorg`：通道/空间重排层。
 * `LayerNorm` / `RMSNorm` / `GroupNorm` / `Softmax`：LLM 与视觉常用归一化/激活层。
 * `YoloV5Focus`：可选 examples 自定义层，供旧版 YOLOv5 param 使用。
+* `Slice`：1D–4D 切片层。
 * ncnn 侧 base layer 切到 mlayer，arch 特化与注册不变；189/189 测试通过。

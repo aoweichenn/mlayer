@@ -49,6 +49,7 @@
 | `GroupNorm` | `include/mlayer/groupnorm.hpp` | group norm，affine 可选 |
 | `Softmax` | `include/mlayer/softmax.hpp` | 1D–4D softmax，正/负 axis |
 | `YoloV5Focus` | `include/mlayer/yolov5focus.hpp` | 可选 examples 自定义层（非 ncnn core） |
+| `Slice` | `include/mlayer/slice.hpp` | 1D–4D 切片，slices/indices 两种模式 |
 
 ncnn 侧对应 `src/layer/<name>.h` 使用
 `using <Name> = mlayer::<Name><Layer, Mat, Option[, ParamDict]>;`，
