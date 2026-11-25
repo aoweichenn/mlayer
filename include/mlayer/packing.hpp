@@ -24,6 +24,7 @@ public:
 public:
     std::int32_t out_elempack;
     std::int32_t use_padding;
+    // Retained for param compatibility; CPU ncnn does not act on them.
     std::int32_t cast_type_from;
     std::int32_t cast_type_to;
 };
@@ -57,10 +58,10 @@ std::int32_t Packing<LayerT, MatT, OptionT, ParamDictT>::forward(const MatT& bot
         top_blob = bottom_blob;
         return 0;
     }
-    if (this->cast_type_from != 0 || this->cast_type_to != 0) {
-        // Storage casts are handled by the Cast layer.
-        return -1;
-    }
+    // ncnn's CPU Packing layer ignores cast_type_from/to: the fields are only
+    // consumed by the Vulkan packing shader, and CPU models use an explicit Cast
+    // layer for storage conversions. Keep the same behaviour so params that
+    // carry these hints still run.
 
     const std::int32_t w = bottom_blob.w;
     const std::int32_t h = bottom_blob.h;
