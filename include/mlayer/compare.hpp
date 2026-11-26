@@ -49,6 +49,9 @@ public:
         }
         const MatT& a = bottom_blobs[0];
         const MatT& b = bottom_blobs[1];
+        if (a.empty() || b.empty()) {
+            return -100;
+        }
         MatT& top = top_blobs[0];
 
         const std::int32_t outw = std::max(a.w, b.w);

@@ -33,6 +33,9 @@ public:
         const MatT& cond = bottom_blobs[0];
         const MatT& a = bottom_blobs[1];
         const MatT& b = bottom_blobs[2];
+        if (cond.empty() || a.empty() || b.empty()) {
+            return -100;
+        }
         MatT& top = top_blobs[0];
 
         const std::int32_t outw = std::max({cond.w, a.w, b.w});

@@ -394,6 +394,9 @@ std::int32_t BinaryOp<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(cons
 {
     const MatT& A = bottom_blobs[0];
     const MatT& B = bottom_blobs[1];
+        if (A.empty() || B.empty()) {
+            return -100;
+        }
     const std::int32_t outdims = std::max(A.dims, B.dims);
 
     MatT A2 = A;
@@ -412,11 +415,15 @@ std::int32_t BinaryOp<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(cons
         {
             if (A.w == B.c)
                 A2 = A.reshape(1, 1, A.w);
+            else if (A.w == B.h)
+                A2 = A.reshape(1, A.w, 1);   // per-channel vector: ONNX [1, C, 1]
             else // if (A.w == B.w)
                 A2 = A.reshape(A.w, 1, 1);
         }
         if (outdims == 3 && A.dims == 2)
-            A2 = A.reshape(1, A.w, A.h);
+            // A 2-D (w,h) tensor is (w,h,1) when the other side has one
+            // channel; expanding to (1,w,h) instead would square the width.
+            A2 = (B.c == 1) ? A.reshape(A.w, A.h, 1) : A.reshape(1, A.w, A.h);
         if (outdims == 4 && A.dims == 1)
         {
             if (A.w == B.c)
@@ -443,11 +450,13 @@ std::int32_t BinaryOp<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(cons
         {
             if (B.w == A.c)
                 B2 = B.reshape(1, 1, B.w);
+            else if (B.w == A.h)
+                B2 = B.reshape(1, B.w, 1);   // per-channel vector: ONNX [1, C, 1]
             else // if (B.w == A.w)
                 B2 = B.reshape(B.w, 1, 1);
         }
         if (outdims == 3 && B.dims == 2)
-            B2 = B.reshape(1, B.w, B.h);
+            B2 = (A.c == 1) ? B.reshape(B.w, B.h, 1) : B.reshape(1, B.w, B.h);
         if (outdims == 4 && B.dims == 1)
         {
             if (B.w == A.c)
