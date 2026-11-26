@@ -41,7 +41,17 @@ public:
         this->coeff = pd.get(2, 1.0F);
         this->axes = pd.get(3, MatT());
         this->keepdims = pd.get(4, 0);
-        const std::int32_t fixbug0 = pd.get(5, 0);
+        std::int32_t fixbug0 = pd.get(5, 0);
+        const std::int32_t scalar_axis = pd.get(6, -99);
+        if (scalar_axis != -99) {
+            this->reduce_all = 0;
+            fixbug0 = 1;
+            this->axes.create(1, static_cast<std::size_t>(sizeof(std::int32_t)));
+            if (this->axes.empty()) {
+                return -1;
+            }
+            *reinterpret_cast<std::int32_t*>(this->axes.data) = scalar_axis;
+        }
 
         if constexpr (Validate) {
             if (this->operation < ReductionOp_SUM || this->operation > ReductionOp_LogSumExp) {
