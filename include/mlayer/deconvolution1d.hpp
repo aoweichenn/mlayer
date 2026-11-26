@@ -115,8 +115,8 @@ std::int32_t Deconvolution1D<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Valid
     const std::int32_t inch = bottom_blob.h;
     const std::size_t elemsize = bottom_blob.elemsize;
     const std::int32_t kernel_extent = this->dilation_w * (this->kernel_w - 1) + 1;
-    const std::int32_t outw_full = (w - 1) * this->stride_w + kernel_extent + this->output_pad_right;
-    const std::int32_t outw = outw_full - this->pad_left - this->pad_right - this->output_pad_right;
+    const std::int32_t outw_full = (w - 1) * this->stride_w + kernel_extent;
+    const std::int32_t outw = outw_full - this->pad_left - this->pad_right + this->output_pad_right;
     if (outw <= 0 || inch % this->group != 0 || this->num_output % this->group != 0) {
         return -1;
     }
