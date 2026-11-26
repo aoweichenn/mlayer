@@ -110,6 +110,29 @@ public:
             }
             return 0;
         }
+        // Width gather (ONNX axis 3 of [N,C,H,W]): pick columns of every row.
+        if (this->axis == 3) {
+            const std::int32_t rows = data.h;
+            const std::int32_t planes = data.c;
+            top_blob.create(count, rows, planes, 4u, opt.blob_allocator);
+            if (top_blob.empty()) {
+                return -100;
+            }
+            for (std::int32_t q = 0; q < planes; ++q) {
+                for (std::int32_t y = 0; y < rows; ++y) {
+                    const float* src = data.channel(q).row(y);
+                    float* dst = top_blob.channel(q).row(y);
+                    for (std::int32_t i = 0; i < count; ++i) {
+                        const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
+                        if (index < 0 || index >= data.w) {
+                            return -100;
+                        }
+                        dst[i] = src[index];
+                    }
+                }
+            }
+            return 0;
+        }
         if (this->axis == 1 && two_d) {
             top_blob.create(count, data.h, 4u, opt.blob_allocator);
             if (top_blob.empty()) {
