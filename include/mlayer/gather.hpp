@@ -135,6 +135,23 @@ public:
             }
             return 0;
         }
+        if (this->axis == 1 && data.dims == 3 && data.c > 1) {
+            top_blob.create(data.w, count, data.c, 4u, opt.blob_allocator);
+            if (top_blob.empty()) {
+                return -100;
+            }
+            for (std::int32_t q = 0; q < data.c; ++q) {
+                for (std::int32_t i = 0; i < count; ++i) {
+                    const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
+                    if (index < 0 || index >= data.h) {
+                        return -100;
+                    }
+                    std::memcpy(top_blob.channel(q).row(i), data.channel(q).row(index),
+                                static_cast<std::size_t>(data.w) * sizeof(float));
+                }
+            }
+            return 0;
+        }
         if (this->axis == 1 && two_d) {
             top_blob.create(count, data.h, 4u, opt.blob_allocator);
             if (top_blob.empty()) {
