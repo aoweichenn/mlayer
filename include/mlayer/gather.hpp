@@ -64,20 +64,8 @@ public:
         const bool one_d = data.dims == 1 || (data.dims == 3 && data.h == 1 && data.c == 1);
         const bool two_d = data.dims == 2 || (data.dims == 3 && data.c == 1);
         if (this->axis == 0) {
-            if (one_d) {
-                top_blob.create(count, 4u, opt.blob_allocator);
-                if (top_blob.empty()) {
-                    return -100;
-                }
-                for (std::int32_t i = 0; i < count; ++i) {
-                    const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
-                    if (index < 0 || index >= data.w) {
-                        return -100;
-                    }
-                    top_blob[i] = data[index];
-                }
-                return 0;
-            }
+            // Prefer the row (h) interpretation for a squeezed 3-D singleton
+            // blob: (w,1,1) is often an ONNX [1, w] row, not a 1-D vector.
             if (two_d) {
                 top_blob.create(data.w, count, 4u, opt.blob_allocator);
                 if (top_blob.empty()) {
@@ -92,9 +80,21 @@ public:
                 }
                 return 0;
             }
+            if (one_d) {
+                top_blob.create(count, 4u, opt.blob_allocator);
+                if (top_blob.empty()) {
+                    return -100;
+                }
+                for (std::int32_t i = 0; i < count; ++i) {
+                    const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
+                    if (index < 0 || index >= data.w) {
+                        return -100;
+                    }
+                    top_blob[i] = data[index];
+                }
+                return 0;
+            }
             if (data.dims == 3) {
-                // ONNX axis 0 of [N,C,L] is the ncnn c axis; the emitter can
-                // only guess the rank, so accept both spellings here.
                 top_blob.create(data.w, data.h, count, 4u, opt.blob_allocator);
                 if (top_blob.empty()) {
                     return -100;
@@ -112,21 +112,6 @@ public:
             return -100;
         }
 
-        if (this->axis == 2 && data.dims == 3) {
-            top_blob.create(data.w, data.h, count, 4u, opt.blob_allocator);
-            if (top_blob.empty()) {
-                return -100;
-            }
-            const std::size_t plane = static_cast<std::size_t>(data.w) * static_cast<std::size_t>(data.h);
-            for (std::int32_t i = 0; i < count; ++i) {
-                const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
-                if (index < 0 || index >= data.c) {
-                    return -100;
-                }
-                std::memcpy(top_blob.channel(i), data.channel(index), plane * sizeof(float));
-            }
-            return 0;
-        }
         // Width gather (ONNX axis 3 of [N,C,H,W]): pick columns of every row.
         if (this->axis == 3) {
             const std::int32_t rows = data.h;
