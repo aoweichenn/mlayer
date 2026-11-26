@@ -18,7 +18,19 @@ public:
     }
 
     std::int32_t load_param(const ParamDictT& pd) override {
-        this->axes = pd.get(3, MatT());
+        // Emitter-friendly scalar axis (key 0). The original ncnn API only
+        // accepted an int32 axes array in key 3; accepting one scalar keeps the
+        // semantics exact in a float-blob runtime.
+        const std::int32_t scalar_axis = pd.get(0, -99);
+        if (scalar_axis != -99) {
+            this->axes.create(1, static_cast<std::size_t>(sizeof(std::int32_t)));
+            if (this->axes.empty()) {
+                return -1;
+            }
+            *reinterpret_cast<std::int32_t*>(this->axes.data) = scalar_axis;
+        } else {
+            this->axes = pd.get(3, MatT());
+        }
         if constexpr (Validate) {
             if (this->axes.w > 4) {
                 return -1;
