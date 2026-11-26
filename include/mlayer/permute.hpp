@@ -64,6 +64,15 @@ std::int32_t Permute<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(const
         return 0;
     }
 
+    // Orders 2..5 only have 3-D/4-D implementations. A 2-D (w,h) blob is a
+    // (w,h,1) tensor; without this an ONNX 3-D transpose over a squeezed blob
+    // silently produced an empty output.
+    if (dims == 2 && this->order_type > 1)
+    {
+        const MatT bottom3 = bottom_blob.reshape(bottom_blob.w, bottom_blob.h, 1);
+        return this->forward(bottom3, top_blob, opt);
+    }
+
     if (dims == 2)
     {
         // order_type
