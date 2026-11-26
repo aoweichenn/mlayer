@@ -64,22 +64,8 @@ public:
         const bool one_d = data.dims == 1 || (data.dims == 3 && data.h == 1 && data.c == 1);
         const bool two_d = data.dims == 2 || (data.dims == 3 && data.c == 1);
         if (this->axis == 0) {
-            // Prefer the row (h) interpretation for a squeezed 3-D singleton
-            // blob: (w,1,1) is often an ONNX [1, w] row, not a 1-D vector.
-            if (two_d) {
-                top_blob.create(data.w, count, 4u, opt.blob_allocator);
-                if (top_blob.empty()) {
-                    return -100;
-                }
-                for (std::int32_t i = 0; i < count; ++i) {
-                    const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
-                    if (index < 0 || index >= data.h) {
-                        return -100;
-                    }
-                    std::memcpy(top_blob.row(i), data.row(index), static_cast<std::size_t>(data.w) * sizeof(float));
-                }
-                return 0;
-            }
+            // Prefer the vector interpretation for a squeezed 3-D singleton
+            // blob: (w,1,1) is an ONNX [1, w] vector, not a matrix with one row.
             if (one_d) {
                 top_blob.create(count, 4u, opt.blob_allocator);
                 if (top_blob.empty()) {
@@ -91,6 +77,20 @@ public:
                         return -100;
                     }
                     top_blob[i] = data[index];
+                }
+                return 0;
+            }
+            if (two_d) {
+                top_blob.create(data.w, count, 4u, opt.blob_allocator);
+                if (top_blob.empty()) {
+                    return -100;
+                }
+                for (std::int32_t i = 0; i < count; ++i) {
+                    const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
+                    if (index < 0 || index >= data.h) {
+                        return -100;
+                    }
+                    std::memcpy(top_blob.row(i), data.row(index), static_cast<std::size_t>(data.w) * sizeof(float));
                 }
                 return 0;
             }
