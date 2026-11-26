@@ -116,20 +116,34 @@ public:
         if (this->axis == 3) {
             const std::int32_t rows = data.h;
             const std::int32_t planes = data.c;
-            top_blob.create(count, rows, planes, 4u, opt.blob_allocator);
+            // A scalar index removes the gathered axis: [N,H,W] -> [N,H].
+            // In ncnn terms (w,h,d,c) -> (h,c,1), not (1,h,c).
+            if (count == 1) {
+                top_blob.create(rows, planes, 1, 4u, opt.blob_allocator);
+            } else {
+                top_blob.create(count, rows, planes, 4u, opt.blob_allocator);
+            }
             if (top_blob.empty()) {
                 return -100;
             }
             for (std::int32_t q = 0; q < planes; ++q) {
                 for (std::int32_t y = 0; y < rows; ++y) {
                     const float* src = data.channel(q).row(y);
-                    float* dst = top_blob.channel(q).row(y);
-                    for (std::int32_t i = 0; i < count; ++i) {
-                        const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
+                    if (count == 1) {
+                        const auto index = static_cast<std::int32_t>(std::lround(indices[0]));
                         if (index < 0 || index >= data.w) {
                             return -100;
                         }
-                        dst[i] = src[index];
+                        top_blob.channel(0).row(q)[y] = src[index];
+                    } else {
+                        float* dst = top_blob.channel(q).row(y);
+                        for (std::int32_t i = 0; i < count; ++i) {
+                            const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
+                            if (index < 0 || index >= data.w) {
+                                return -100;
+                            }
+                            dst[i] = src[index];
+                        }
                     }
                 }
             }
