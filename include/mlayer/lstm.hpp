@@ -7,6 +7,8 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <vector>
 
@@ -83,6 +85,11 @@ MLAYER_LSTM_TEMPLATE
 std::int32_t LSTM<LayerT, MatT, OptionT, ParamDictT, ModelBinT, Validate>::load_model(const ModelBinT& mb) {
     const std::int32_t num_directions = this->direction == 2 ? 2 : 1;
     const std::int32_t size = this->weight_data_size / num_directions / this->hidden_size / 4;
+    if (std::getenv("MNET_TRACE_LSTM") != nullptr) {
+        std::fprintf(stderr, "[lstm] num_output=%d hidden=%d direction=%d weight_size=%d dirs=%d size=%d\n",
+                     this->num_output, this->hidden_size, this->direction, this->weight_data_size,
+                     num_directions, size);
+    }
 
     this->weight_xc_data = mb.load(size, this->hidden_size * 4, num_directions, 0);
     this->bias_c_data = mb.load(this->hidden_size, 4, num_directions, 0);
