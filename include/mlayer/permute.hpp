@@ -40,7 +40,7 @@ std::int32_t Permute<LayerT, MatT, OptionT, ParamDictT, Validate>::load_param(co
     order_type = pd.get(0, 0);
 
 if constexpr (Validate) {
-    if (order_type < 0 || order_type > 23)
+    if (order_type < 0 || (order_type > 23 && order_type != 114 && order_type != 115))
         return -1;
 }
 
@@ -57,6 +57,30 @@ std::int32_t Permute<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(const
     std::size_t elemsize = bottom_blob.elemsize;
 
     std::int32_t dims = bottom_blob.dims;
+
+    if (dims <= 3 && this->order_type >= 100) {
+        const std::int32_t forced = this->order_type - 100;
+        if (forced == 14) {
+            top_blob.create(w, channels, 1, h, elemsize, opt.blob_allocator);
+            if (top_blob.empty()) return -100;
+#pragma omp parallel for num_threads(opt.num_threads)
+            for (std::int32_t q = 0; q < h; ++q)
+                for (std::int32_t i = 0; i < channels; ++i)
+                    for (std::int32_t j = 0; j < w; ++j)
+                        top_blob.channel(q).depth(0).row(i)[j] = bottom_blob.channel(i).row(q)[j];
+            return 0;
+        }
+        if (forced == 15) {
+            top_blob.create(channels, w, 1, h, elemsize, opt.blob_allocator);
+            if (top_blob.empty()) return -100;
+#pragma omp parallel for num_threads(opt.num_threads)
+            for (std::int32_t q = 0; q < h; ++q)
+                for (std::int32_t i = 0; i < channels; ++i)
+                    for (std::int32_t j = 0; j < w; ++j)
+                        top_blob.channel(q).depth(0).row(j)[i] = bottom_blob.channel(i).row(q)[j];
+            return 0;
+        }
+    }
 
     // 4-D orders applied to a blob whose depth is an implicit singleton:
     // (c, w, d, h) and (w, c, d, h) collapse onto the 3-D orders 3 and 2.
