@@ -9,6 +9,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace mlayer {
@@ -20,43 +21,77 @@ inline bool stft_is_power_of_two(std::int32_t value)
     return value > 0 && (value & (value - 1)) == 0;
 }
 
-// In-place radix-2 FFT using float32 arithmetic. Bluestein needs a
-// power-of-two transform length even when the frame length is not.
+inline std::uint32_t stft_bit_reverse(std::uint32_t value, unsigned significant_bits)
+{
+    std::uint32_t reversed = 0;
+    for (unsigned bit = 0; bit < significant_bits; ++bit)
+    {
+        reversed = (reversed << 1) | (value & 1U);
+        value >>= 1;
+    }
+    return reversed;
+}
+
+// Radix-2 FFT using the same bit-reversed Vandermonde table and butterfly
+// ordering as ONNX Runtime's DFT kernel. The inverse call deliberately reuses
+// the forward twiddles; Bluestein undoes the resulting reversal when reading
+// the convolution output. This keeps the phase noise of near-zero bins as
+// close as possible to the ONNX Runtime reference.
 inline void stft_fft_radix2(std::vector<std::complex<float> >& data, bool inverse)
 {
     const std::size_t size = data.size();
-    for (std::size_t i = 1, j = 0; i < size; ++i)
+    unsigned significant_bits = 0;
+    for (std::size_t value = size; value > 1; value >>= 1)
     {
-        std::size_t bit = size >> 1;
-        for (; (j & bit) != 0; bit >>= 1)
-        {
-            j ^= bit;
-        }
-        j ^= bit;
-        if (i < j)
-        {
-            std::swap(data[i], data[j]);
-        }
+        ++significant_bits;
     }
 
-    constexpr float kPi = 3.14159265358979323846F;
+    constexpr float kTau = 6.28318530717958647692F;
+    const float angular_velocity = -kTau / static_cast<float>(size);
+    std::vector<std::complex<float> > vandermonde(size);
+    for (std::size_t i = 0; i < size; ++i)
+    {
+        const float angle = static_cast<float>(i) * angular_velocity;
+        vandermonde[stft_bit_reverse(static_cast<std::uint32_t>(i), significant_bits)] =
+            std::complex<float>(std::cos(angle), std::sin(angle));
+    }
+
+    std::vector<std::complex<float> > values(size);
+    for (std::size_t i = 0; i < size; ++i)
+    {
+        values[i] = data[stft_bit_reverse(static_cast<std::uint32_t>(i), significant_bits)];
+    }
+
+    unsigned current_bits = 0;
     for (std::size_t length = 2; length <= size; length <<= 1)
     {
-        const float angle = (inverse ? 2.0F : -2.0F) * kPi / static_cast<float>(length);
-        const std::size_t half = length >> 1;
-        for (std::size_t start = 0; start < size; start += length)
+        const std::size_t midpoint = length >> 1;
+        ++current_bits;
+        for (std::size_t k = 0; k < midpoint; ++k)
         {
-            for (std::size_t k = 0; k < half; ++k)
+            const auto first_index = stft_bit_reverse(static_cast<std::uint32_t>(k), current_bits);
+            const auto second_index = stft_bit_reverse(static_cast<std::uint32_t>(midpoint + k), current_bits);
+            for (std::size_t start = 0; start < size; start += length)
             {
-                const float phase = angle * static_cast<float>(k);
-                const std::complex<float> twiddle(std::cos(phase), std::sin(phase));
-                const std::complex<float> u = data[start + k];
-                const std::complex<float> v = twiddle * data[start + k + half];
-                data[start + k] = u + v;
-                data[start + k + half] = u - v;
+                const std::size_t even_index = k + start;
+                const std::size_t odd_index = k + start + midpoint;
+                const std::complex<float> even = values[even_index];
+                const std::complex<float> odd = values[odd_index];
+                values[even_index] = even + vandermonde[first_index] * odd;
+                values[odd_index] = even + vandermonde[second_index] * odd;
             }
         }
     }
+
+    if (inverse)
+    {
+        const float scale = 1.0F / static_cast<float>(size);
+        for (std::complex<float>& value : values)
+        {
+            value *= scale;
+        }
+    }
+    data = std::move(values);
 }
 
 }  // namespace detail
@@ -131,7 +166,6 @@ public:
                 kernel[fft_length - static_cast<std::size_t>(n)] = std::conj(chirp[static_cast<std::size_t>(n)]);
             }
             detail::stft_fft_radix2(kernel, false);
-            const float inverse_scale = 1.0F / static_cast<float>(fft_length);
 
             #pragma omp parallel num_threads(opt.num_threads)
             {
@@ -151,8 +185,10 @@ public:
                     }
                     detail::stft_fft_radix2(frame, true);
                     for (std::int32_t k = 0; k < bins; ++k) {
-                        const std::complex<float> value = frame[static_cast<std::size_t>(k)] *
-                                                          chirp[static_cast<std::size_t>(k)] * inverse_scale;
+                        const auto index = static_cast<std::size_t>(k);
+                        const std::complex<float> convolution =
+                            k == 0 ? frame[0] : frame[fft_length - index];
+                        const std::complex<float> value = convolution * chirp[index];
                         top_blob.channel(f).row(k)[0] = value.real();
                         top_blob.channel(f).row(k)[1] = value.imag();
                     }
