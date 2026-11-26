@@ -92,6 +92,23 @@ public:
                 }
                 return 0;
             }
+            if (data.dims == 3) {
+                // ONNX axis 0 of [N,C,L] is the ncnn c axis; the emitter can
+                // only guess the rank, so accept both spellings here.
+                top_blob.create(data.w, data.h, count, 4u, opt.blob_allocator);
+                if (top_blob.empty()) {
+                    return -100;
+                }
+                const std::size_t plane = static_cast<std::size_t>(data.w) * static_cast<std::size_t>(data.h);
+                for (std::int32_t i = 0; i < count; ++i) {
+                    const auto index = static_cast<std::int32_t>(std::lround(indices[i]));
+                    if (index < 0 || index >= data.c) {
+                        return -100;
+                    }
+                    std::memcpy(top_blob.channel(i), data.channel(index), plane * sizeof(float));
+                }
+                return 0;
+            }
             return -100;
         }
 
