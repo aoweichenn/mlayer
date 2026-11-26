@@ -53,12 +53,13 @@ public:
         const std::int32_t bins = frame_length / 2 + 1;
 
         MatT& top_blob = top_blobs[0];
-        top_blob.create(bins, frames, 2, 4u, opt.blob_allocator);
+        // ONNX STFT is [N, frames, bins, 2]; ncnn 4-D is (w,h,d,c), so
+        // real/imag must be the fastest axis and frames the channel axis.
+        top_blob.create(2, bins, 1, frames, 4u, opt.blob_allocator);
         if (top_blob.empty()) {
             return -100;
         }
-        MatT real = top_blob.channel(0);
-        MatT imag = top_blob.channel(1);
+        // Real/imag views are replaced by direct interleaved writes below.
 
         const auto* win = static_cast<const float*>(window);
         // Twiddle factors for one frame, reused by every frame.
@@ -89,8 +90,8 @@ public:
                     sum_re += value * static_cast<double>(cos_table[index]);
                     sum_im -= value * static_cast<double>(sin_table[index]);
                 }
-                real.row(f)[k] = static_cast<float>(sum_re);
-                imag.row(f)[k] = static_cast<float>(sum_im);
+                top_blob.channel(f).row(k)[0] = static_cast<float>(sum_re);
+                top_blob.channel(f).row(k)[1] = static_cast<float>(sum_im);
             }
         }
         return 0;
