@@ -58,6 +58,12 @@ std::int32_t Permute<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(const
 
     std::int32_t dims = bottom_blob.dims;
 
+    // 4-D orders applied to a blob whose depth is an implicit singleton:
+    // (c, w, d, h) and (w, c, d, h) collapse onto the 3-D orders 3 and 2.
+    const std::int32_t order_type = (dims <= 3 && this->order_type >= 6)
+                                        ? (this->order_type == 14 ? 2 : (this->order_type == 15 ? 3 : this->order_type))
+                                        : this->order_type;
+
     if (dims == 1)
     {
         top_blob = bottom_blob;
@@ -67,7 +73,7 @@ std::int32_t Permute<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(const
     // Orders 2..5 only have 3-D/4-D implementations. A 2-D (w,h) blob is a
     // (w,h,1) tensor; without this an ONNX 3-D transpose over a squeezed blob
     // silently produced an empty output.
-    if (dims == 2 && this->order_type > 1)
+    if (dims == 2 && order_type > 1)
     {
         const MatT bottom3 = bottom_blob.reshape(bottom_blob.w, bottom_blob.h, 1);
         return this->forward(bottom3, top_blob, opt);
