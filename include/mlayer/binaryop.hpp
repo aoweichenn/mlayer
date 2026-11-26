@@ -470,6 +470,13 @@ std::int32_t BinaryOp<LayerT, MatT, OptionT, ParamDictT, Validate>::forward(cons
             B2 = B.reshape(1, B.w, B.h, B.c);
     }
 
+    // Validate only after the 1-D/2-D expansion below, otherwise a valid
+    // per-channel vector would be rejected.
+    if ((A2.w > 1 && B2.w > 1 && A2.w != B2.w) || (A2.h > 1 && B2.h > 1 && A2.h != B2.h) ||
+        (A2.c > 1 && B2.c > 1 && A2.c != B2.c)) {
+        return -1;
+    }
+
     const std::int32_t outw = std::max(A2.w, B2.w);
     const std::int32_t outh = std::max(A2.h, B2.h);
     const std::int32_t outd = std::max(A2.d, B2.d);

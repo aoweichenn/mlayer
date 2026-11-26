@@ -33,6 +33,11 @@ public:
         const MatT& cond = bottom_blobs[0];
         const MatT& a = bottom_blobs[1];
         const MatT& b = bottom_blobs[2];
+        if ((a.w > 1 && b.w > 1 && a.w != b.w) || (a.h > 1 && b.h > 1 && a.h != b.h) ||
+            (a.c > 1 && b.c > 1 && a.c != b.c) || (cond.w > 1 && a.w > 1 && cond.w != a.w) ||
+            (cond.h > 1 && a.h > 1 && cond.h != a.h) || (cond.c > 1 && a.c > 1 && cond.c != a.c)) {
+            return -1;
+        }
         if (cond.empty() || a.empty() || b.empty()) {
             return -100;
         }
